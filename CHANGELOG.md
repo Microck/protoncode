@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.0](https://github.com/Microck/protoncode/compare/v0.1.5...v0.2.0) (2026-03-13)
+
+
+### Features
+
+* **linux:** add desktop runtime and release packaging ([d650b2e](https://github.com/Microck/protoncode/commit/d650b2e8755a87e358dcb3f844e84e4b9942103d))
+
 ## [0.1.5](https://github.com/Microck/protoncode/compare/v0.1.4...v0.1.5) (2026-03-13)
 
 
