@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.1](https://github.com/Microck/protoncode/compare/v0.2.0...v0.2.1) (2026-03-13)
+
+
+### Bug Fixes
+
+* **debug:** add hidden logs and improve otp capture ([e250644](https://github.com/Microck/protoncode/commit/e2506442e903120d8fd45413ad867bb71ea5be8d))
+
 ## [0.2.0](https://github.com/Microck/protoncode/compare/v0.1.5...v0.2.0) (2026-03-13)
 
 
