@@ -3,6 +3,12 @@ name: release-linux
 on:
   release:
     types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to attach artifacts to
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -10,8 +16,12 @@ permissions:
 jobs:
   build-linux:
     runs-on: ubuntu-latest
+    env:
+      RELEASE_TAG: ${{ github.event.release.tag_name || inputs.tag }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_TAG }}
 
       - name: install linux packaging dependencies
         run: |
@@ -35,7 +45,7 @@ jobs:
 
       - name: stage linux release files
         run: |
-          version="${{ github.event.release.tag_name }}"
+          version="${{ env.RELEASE_TAG }}"
           archive_root="dist/protoncode-${version}-linux-x86_64"
           mkdir -p "$archive_root"
           cp target/release/protoncode "$archive_root/"
@@ -45,16 +55,17 @@ jobs:
           tar -C dist -czf "dist/protoncode-${version}-linux-x86_64.tar.gz" "protoncode-${version}-linux-x86_64"
 
       - name: build deb package
-        run: cargo deb --no-build --output "dist/protoncode-${{ github.event.release.tag_name }}-linux-x86_64.deb"
+        run: cargo deb --no-build --output "dist/protoncode-${{ env.RELEASE_TAG }}-linux-x86_64.deb"
 
       - name: build rpm package
         run: |
           cargo generate-rpm
-          cp target/generate-rpm/*.rpm "dist/protoncode-${{ github.event.release.tag_name }}-linux-x86_64.rpm"
+          cp target/generate-rpm/*.rpm "dist/protoncode-${{ env.RELEASE_TAG }}-linux-x86_64.rpm"
 
       - name: upload linux release artifacts
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ env.RELEASE_TAG }}
           files: |
             dist/protoncode-*-linux-x86_64.tar.gz
             dist/protoncode-*-linux-x86_64.deb

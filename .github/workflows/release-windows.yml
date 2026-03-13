@@ -3,6 +3,12 @@ name: release-windows
 on:
   release:
     types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to attach artifacts to
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -10,8 +16,12 @@ permissions:
 jobs:
   build-windows:
     runs-on: windows-latest
+    env:
+      RELEASE_TAG: ${{ github.event.release.tag_name || inputs.tag }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_TAG }}
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -25,11 +35,12 @@ jobs:
       - name: stage release files
         shell: pwsh
         run: |
-          $version = "${{ github.event.release.tag_name }}"
+          $version = "${{ env.RELEASE_TAG }}"
           New-Item -ItemType Directory -Force -Path "dist" | Out-Null
           Copy-Item "target/x86_64-pc-windows-msvc/release/protoncode.exe" "dist/protoncode-$version-windows-x86_64.exe"
 
       - name: upload release exe
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ env.RELEASE_TAG }}
           files: dist/protoncode-*.exe
