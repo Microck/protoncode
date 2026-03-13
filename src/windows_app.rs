@@ -7,6 +7,7 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result, anyhow};
 use arboard::Clipboard;
+use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 use tao::dpi::{LogicalPosition, LogicalSize};
 use tao::event::{Event, StartCause, WindowEvent};
@@ -34,7 +35,6 @@ const OVERLAY_WINDOW_TITLE: &str = "ProtonCode Notification";
 const OVERLAY_WIDTH: f64 = 420.0;
 const OVERLAY_HEIGHT: f64 = 236.0;
 const APP_PROTOCOL: &str = "protoncode";
-const APP_ICON_URL: &str = "protoncode://app/icon/protoncode.png";
 const OVERLAY_PAGE_URL: &str = "protoncode://app/overlay.html";
 const SETTINGS_PAGE_URL: &str = "protoncode://app/settings.html";
 
@@ -689,6 +689,7 @@ fn proton_monitor_script(poll_interval_seconds: u64) -> String {
 }
 
 fn overlay_html() -> String {
+    let app_icon_url = app_icon_data_url();
     let mut html = String::from(
         r#"<!doctype html>
 <html>
@@ -703,18 +704,16 @@ fn overlay_html() -> String {
         r#"
       :root {
         color-scheme: dark;
-        --bg: #06142c;
-        --panel: rgba(7, 20, 44, 0.94);
-        --panel-strong: rgba(9, 28, 61, 0.98);
-        --panel-border: rgba(143, 189, 255, 0.16);
+        --bg: #081221;
+        --panel: rgba(10, 21, 41, 0.98);
+        --panel-strong: rgba(12, 24, 46, 0.98);
+        --panel-border: rgba(129, 154, 196, 0.2);
         --panel-outline: rgba(255, 255, 255, 0.05);
         --text: #f8fbff;
-        --muted: #9eb2d1;
-        --accent: #8b5cf6;
+        --muted: #9aaac5;
         --accent-strong: #6d4aff;
-        --accent-soft: rgba(139, 92, 246, 0.18);
-        --cyan-soft: rgba(80, 198, 255, 0.16);
-        --shadow: 0 22px 58px rgba(2, 10, 25, 0.44);
+        --accent-soft: rgba(109, 74, 255, 0.12);
+        --shadow: 0 22px 44px rgba(2, 8, 20, 0.42);
         --font: "Arizona Sans Local", "Ubuntu Local", "Segoe UI", sans-serif;
         --font-display: "Arizona Flare Local", "Arizona Sans Local", "Ubuntu Local", "Segoe UI", sans-serif;
       }
@@ -746,10 +745,7 @@ fn overlay_html() -> String {
         padding: 18px 18px 16px;
         border-radius: 24px;
         border: 1px solid var(--panel-border);
-        background:
-          linear-gradient(135deg, rgba(80, 198, 255, 0.16), transparent 34%),
-          radial-gradient(circle at top right, rgba(230, 89, 173, 0.22), transparent 28%),
-          linear-gradient(180deg, rgba(15, 35, 72, 0.98) 0%, rgba(6, 20, 44, 0.98) 100%);
+        background: var(--panel);
         color: var(--text);
         box-shadow: var(--shadow);
         overflow: hidden;
@@ -775,9 +771,10 @@ fn overlay_html() -> String {
         gap: 12px;
       }
       .brand-mark {
-        width: 18px;
-        height: 18px;
-        border-radius: 6px;
+        width: 20px;
+        height: 20px;
+        border-radius: 7px;
+        display: block;
       }
       .brand-label {
         font-size: 11px;
@@ -788,17 +785,17 @@ fn overlay_html() -> String {
       .time-pill {
         padding: 6px 10px;
         border-radius: 999px;
-        border: 1px solid rgba(255, 255, 255, 0.08);
-        background: rgba(255, 255, 255, 0.05);
+        border: 1px solid rgba(129, 154, 196, 0.18);
+        background: rgba(255, 255, 255, 0.04);
         color: var(--muted);
         font-size: 12px;
       }
       .headline {
         margin-top: 14px;
         font-size: 14px;
-        font-family: var(--font-display);
+        font-family: var(--font);
         font-weight: 450;
-        color: #c7d8f3;
+        color: #cbd8ec;
       }
       .source {
         margin-top: 6px;
@@ -816,10 +813,8 @@ fn overlay_html() -> String {
         flex: 1;
         padding: 14px 16px;
         border-radius: 18px;
-        border: 1px solid rgba(139, 92, 246, 0.22);
-        background:
-          linear-gradient(180deg, rgba(139, 92, 246, 0.18), rgba(69, 39, 160, 0.12)),
-          rgba(12, 28, 58, 0.88);
+        border: 1px solid rgba(109, 74, 255, 0.22);
+        background: var(--panel-strong);
         font-size: 30px;
         font-weight: 500;
         letter-spacing: 0.2em;
@@ -862,8 +857,8 @@ fn overlay_html() -> String {
         background: rgba(255, 255, 255, 0.06);
       }
       .primary {
-        background: linear-gradient(135deg, var(--accent) 0%, var(--accent-strong) 100%);
-        box-shadow: 0 12px 24px rgba(109, 74, 255, 0.26);
+        background: var(--accent-strong);
+        border: 1px solid rgba(134, 112, 255, 0.32);
       }
     </style>
   </head>
@@ -959,10 +954,11 @@ fn overlay_html() -> String {
 "#,
     );
 
-    html.replace("__APP_ICON__", APP_ICON_URL)
+    html.replace("__APP_ICON__", &app_icon_url)
 }
 
 fn settings_html() -> String {
+    let app_icon_url = app_icon_data_url();
     let mut html = String::from(
         r#"<!doctype html>
 <html>
@@ -977,19 +973,16 @@ fn settings_html() -> String {
         r#"
       :root {
         color-scheme: dark;
-        --bg: #06142c;
-        --panel: rgba(7, 20, 44, 0.9);
-        --panel-border: rgba(143, 189, 255, 0.18);
+        --bg: #081221;
+        --panel: rgba(10, 21, 41, 0.98);
+        --panel-border: rgba(129, 154, 196, 0.18);
         --panel-outline: rgba(255, 255, 255, 0.05);
-        --surface: rgba(9, 24, 54, 0.82);
-        --surface-strong: rgba(12, 32, 67, 0.92);
+        --surface: rgba(12, 24, 46, 0.88);
+        --surface-strong: rgba(14, 28, 52, 0.96);
         --text: #f8fbff;
-        --muted: #a0b3d1;
-        --accent: #8b5cf6;
+        --muted: #9aaac5;
         --accent-strong: #6d4aff;
-        --accent-soft: rgba(139, 92, 246, 0.18);
-        --cyan-soft: rgba(80, 198, 255, 0.14);
-        --field-border: rgba(154, 176, 212, 0.16);
+        --field-border: rgba(129, 154, 196, 0.18);
         --font: "Arizona Sans Local", "Ubuntu Local", "Segoe UI", sans-serif;
         --font-display: "Arizona Flare Local", "Arizona Sans Local", "Ubuntu Local", "Segoe UI", sans-serif;
       }
@@ -1001,10 +994,7 @@ fn settings_html() -> String {
         min-height: 100%;
         color: var(--text);
         font-family: var(--font);
-        background:
-          radial-gradient(circle at top left, rgba(80, 198, 255, 0.18), transparent 28%),
-          radial-gradient(circle at top right, rgba(230, 89, 173, 0.18), transparent 24%),
-          linear-gradient(180deg, #041022 0%, #091933 100%);
+        background: var(--bg);
       }
       body {
         padding: 30px;
@@ -1015,7 +1005,7 @@ fn settings_html() -> String {
         padding: 28px;
         border-radius: 28px;
         border: 1px solid var(--panel-border);
-        background: linear-gradient(180deg, rgba(8, 23, 50, 0.94), rgba(5, 16, 35, 0.98));
+        background: var(--panel);
         box-shadow: 0 28px 80px rgba(2, 10, 25, 0.42);
         position: relative;
         overflow: hidden;
@@ -1043,7 +1033,7 @@ fn settings_html() -> String {
         width: 44px;
         height: 44px;
         border-radius: 14px;
-        box-shadow: 0 12px 24px rgba(109, 74, 255, 0.24);
+        display: block;
       }
       .eyebrow {
         margin: 0 0 6px;
@@ -1062,15 +1052,15 @@ fn settings_html() -> String {
       .lede {
         margin: 10px 0 0;
         max-width: 420px;
-        color: #cad8f0;
+        color: #c8d5e7;
         line-height: 1.55;
       }
       .hero-badge {
         padding: 10px 14px;
         border-radius: 16px;
-        background: linear-gradient(135deg, var(--cyan-soft), rgba(139, 92, 246, 0.18));
-        border: 1px solid rgba(143, 189, 255, 0.14);
-        color: #d8e6ff;
+        background: rgba(255, 255, 255, 0.04);
+        border: 1px solid rgba(129, 154, 196, 0.14);
+        color: #c8d5e7;
         font-size: 12px;
         text-align: right;
       }
@@ -1083,8 +1073,8 @@ fn settings_html() -> String {
       .status-card {
         padding: 16px;
         border-radius: 20px;
-        background: linear-gradient(180deg, rgba(15, 35, 72, 0.7), rgba(7, 19, 42, 0.9));
-        border: 1px solid rgba(143, 189, 255, 0.12);
+        background: var(--surface);
+        border: 1px solid rgba(129, 154, 196, 0.14);
       }
       .status-card span {
         display: block;
@@ -1105,14 +1095,14 @@ fn settings_html() -> String {
         margin-top: 26px;
         padding: 20px;
         border-radius: 22px;
-        background: linear-gradient(180deg, rgba(9, 24, 54, 0.8), rgba(7, 19, 42, 0.92));
-        border: 1px solid rgba(143, 189, 255, 0.12);
+        background: var(--surface-strong);
+        border: 1px solid rgba(129, 154, 196, 0.14);
       }
       .section-title {
         margin: 0 0 6px;
         font-size: 18px;
-        font-family: var(--font-display);
-        font-weight: 450;
+        font-family: var(--font);
+        font-weight: 500;
       }
       .section-copy {
         margin: 0 0 18px;
@@ -1194,8 +1184,8 @@ fn settings_html() -> String {
         background: rgba(255, 255, 255, 0.12);
       }
       .primary {
-        background: linear-gradient(135deg, var(--accent) 0%, var(--accent-strong) 100%);
-        box-shadow: 0 14px 28px rgba(109, 74, 255, 0.24);
+        background: var(--accent-strong);
+        border: 1px solid rgba(134, 112, 255, 0.32);
       }
       @media (max-width: 640px) {
         body {
@@ -1340,7 +1330,7 @@ fn settings_html() -> String {
 "#,
     );
 
-    html.replace("__APP_ICON__", APP_ICON_URL)
+    html.replace("__APP_ICON__", &app_icon_url)
 }
 
 fn embedded_font_face_css() -> &'static str {
@@ -1374,6 +1364,14 @@ fn embedded_font_face_css() -> &'static str {
 "#
 }
 
+fn app_icon_data_url() -> String {
+    format!(
+        "data:image/png;base64,{}",
+        base64::engine::general_purpose::STANDARD
+            .encode(include_bytes!("../assets/protoncode-icon.png"))
+    )
+}
+
 fn app_protocol_response(request: Request<Vec<u8>>) -> Response<Cow<'static, [u8]>> {
     let path = request.uri().path();
 
@@ -1393,9 +1391,6 @@ fn app_protocol_response(request: Request<Vec<u8>>) -> Response<Cow<'static, [u8
         }
         "/fonts/ubuntu-m.ttf" => {
             asset_response("font/ttf", include_bytes!("../assets/ubuntu-m.ttf"))
-        }
-        "/icon/protoncode.png" => {
-            asset_response("image/png", include_bytes!("../assets/protoncode-icon.png"))
         }
         _ => Response::builder()
             .status(StatusCode::NOT_FOUND)
