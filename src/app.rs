@@ -11,6 +11,7 @@ use crate::models::{MailSessionState, OtpCandidateEmail, OtpNotification};
 use crate::otp::detect_otp;
 
 const RECENT_CACHE_LIMIT: usize = 128;
+const DEBUG_LOG_LIMIT: usize = 80;
 
 #[derive(Debug, Clone)]
 pub struct AppState {
@@ -19,6 +20,7 @@ pub struct AppState {
     pub current_notification: Option<OtpNotification>,
     recent_message_ids: HashSet<String>,
     recent_message_order: VecDeque<String>,
+    debug_log_entries: VecDeque<String>,
     seen_cache_path: PathBuf,
 }
 
@@ -34,18 +36,23 @@ impl AppState {
 
         let (recent_message_ids, recent_message_order) =
             load_seen_cache(&seen_cache_path).unwrap_or_default();
-        Ok(Self {
+        let mut state = Self {
             config,
             session_state: MailSessionState::Unauthenticated,
             current_notification: None,
             recent_message_ids,
             recent_message_order,
+            debug_log_entries: VecDeque::new(),
             seen_cache_path,
-        })
+        };
+        state.push_debug_log("Application started");
+        Ok(state)
     }
 
-    pub fn set_session_state(&mut self, state: MailSessionState) {
+    pub fn set_session_state(&mut self, state: MailSessionState) -> bool {
+        let changed = self.session_state != state;
         self.session_state = state;
+        changed
     }
 
     pub fn register_candidate(&mut self, email: &OtpCandidateEmail) -> Option<OtpNotification> {
@@ -78,6 +85,29 @@ impl AppState {
         self.current_notification
             .as_ref()
             .map(|notification| notification.raw_code.as_str())
+    }
+
+    pub fn has_seen_message(&self, message_id: &str) -> bool {
+        self.recent_message_ids.contains(message_id)
+    }
+
+    pub fn push_debug_log(&mut self, message: impl Into<String>) {
+        let now = OffsetDateTime::now_utc();
+        let entry = format!(
+            "{:02}:{:02}:{:02} {}",
+            now.hour(),
+            now.minute(),
+            now.second(),
+            message.into()
+        );
+        self.debug_log_entries.push_front(entry);
+        while self.debug_log_entries.len() > DEBUG_LOG_LIMIT {
+            self.debug_log_entries.pop_back();
+        }
+    }
+
+    pub fn debug_logs(&self) -> Vec<String> {
+        self.debug_log_entries.iter().cloned().collect()
     }
 
     fn track_message(&mut self, message_id: String) {

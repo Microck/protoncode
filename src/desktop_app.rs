@@ -37,7 +37,7 @@ const SETTINGS_HTML_TITLE: &str = "ProtonCode";
 const PROTON_LOGIN_TITLE: &str = "Proton Mail - ProtonCode";
 const OVERLAY_WINDOW_TITLE: &str = "ProtonCode Notification";
 const OVERLAY_WIDTH: f64 = 420.0;
-const OVERLAY_HEIGHT: f64 = 236.0;
+const OVERLAY_HEIGHT: f64 = 222.0;
 const APP_PROTOCOL: &str = "protoncode";
 const OVERLAY_PAGE_URL: &str = "protoncode://app/overlay.html";
 const SETTINGS_PAGE_URL: &str = "protoncode://app/settings.html";
@@ -176,6 +176,14 @@ fn handle_user_event(
                 autostart::sync_launch_on_startup(launch_on_startup)?;
                 state.config.launch_on_startup = launch_on_startup;
                 state.save_config()?;
+                let poll_interval = state.config.poll_interval_seconds;
+                let notification_duration = state.config.notification_duration_seconds;
+                let copy_enabled = state.config.copy_button_enabled;
+                let launch_on_startup = state.config.launch_on_startup;
+                state.push_debug_log(format!(
+                    "Config saved: interval={}s, duration={}s, copy={}, autostart={}",
+                    poll_interval, notification_duration, copy_enabled, launch_on_startup
+                ));
                 refresh_settings(&windows.settings, &state)?;
             }
             "test_notification" => {
@@ -189,6 +197,7 @@ fn handle_user_event(
                     );
                     let copy_enabled = state.config.copy_button_enabled;
                     state.current_notification = Some(notification.clone());
+                    state.push_debug_log("Debug notification triggered");
                     refresh_settings(&windows.settings, &state)?;
                     (notification, copy_enabled)
                 };
@@ -256,13 +265,23 @@ fn handle_proton_snapshot(
         body_text: snapshot.text,
     };
 
+    let was_seen = state_guard.has_seen_message(&candidate.message_id);
     if let Some(notification) = state_guard.register_candidate(&candidate) {
+        state_guard.push_debug_log(format!(
+            "OTP matched from {} -> {}",
+            notification.source_label, notification.masked_code
+        ));
         show_overlay(
             &windows.overlay_window,
             &windows.overlay,
             &notification,
             state_guard.config.copy_button_enabled,
         )?;
+    } else if !was_seen && snapshot_has_otp_signal(&candidate.body_text) {
+        state_guard.push_debug_log(format!(
+            "Snapshot captured but no OTP matched: {}",
+            truncate_debug_title(&snapshot.title)
+        ));
     }
 
     refresh_settings(&windows.settings, &state_guard)?;
@@ -275,7 +294,9 @@ fn update_session(
     session_state: MailSessionState,
 ) -> Result<()> {
     let mut state = lock_state(&state)?;
-    state.set_session_state(session_state);
+    if state.set_session_state(session_state) {
+        state.push_debug_log(format!("Session -> {}", session_state_label(session_state)));
+    }
     refresh_settings(settings, &state)?;
     Ok(())
 }
@@ -375,13 +396,62 @@ fn infer_session_state(snapshot: &ProtonSnapshot) -> MailSessionState {
     let url = snapshot.url.as_str();
     let text = snapshot.text.to_lowercase();
 
-    if url.contains("account.proton.me") || text.contains("sign in") || text.contains("log in") {
-        MailSessionState::Unauthenticated
-    } else if url.contains("mail.proton.me") {
+    if url.contains("mail.proton.me") {
         MailSessionState::Authenticated
+    } else if url.contains("account.proton.me")
+        || url.contains("/login")
+        || text.contains("sign in to proton")
+        || text.contains("log in to proton")
+    {
+        MailSessionState::Unauthenticated
     } else {
         MailSessionState::Restoring
     }
+}
+
+fn session_state_label(state: MailSessionState) -> &'static str {
+    match state {
+        MailSessionState::Unauthenticated => "Sign-in required",
+        MailSessionState::Restoring => "Restoring session",
+        MailSessionState::Authenticated => "Monitoring active",
+        MailSessionState::Expired => "Session expired",
+        MailSessionState::Error => "Attention needed",
+        MailSessionState::Paused => "Monitoring paused",
+    }
+}
+
+fn snapshot_has_otp_signal(text: &str) -> bool {
+    let lowered = text.to_lowercase();
+    let has_context = [
+        "code",
+        "verification",
+        "2fa",
+        "two-factor",
+        "two factor",
+        "otp",
+        "security",
+        "passcode",
+    ]
+    .iter()
+    .any(|term| lowered.contains(term));
+    let has_digits = text
+        .chars()
+        .filter(|ch| ch.is_ascii_digit())
+        .take(4)
+        .count()
+        >= 4;
+    has_context || has_digits
+}
+
+fn truncate_debug_title(title: &str) -> String {
+    const LIMIT: usize = 72;
+    let trimmed = title.trim();
+    if trimmed.chars().count() <= LIMIT {
+        return trimmed.to_owned();
+    }
+
+    let shortened: String = trimmed.chars().take(LIMIT - 1).collect();
+    format!("{shortened}…")
 }
 
 fn fingerprint_snapshot(snapshot: &ProtonSnapshot) -> String {
@@ -424,6 +494,7 @@ trait StateView {
     fn config(&self) -> &AppConfig;
     fn session_state(&self) -> MailSessionState;
     fn current_notification(&self) -> Option<&OtpNotification>;
+    fn debug_logs(&self) -> Vec<String>;
 }
 
 impl StateView for AppState {
@@ -438,6 +509,10 @@ impl StateView for AppState {
     fn current_notification(&self) -> Option<&OtpNotification> {
         self.current_notification.as_ref()
     }
+
+    fn debug_logs(&self) -> Vec<String> {
+        AppState::debug_logs(self)
+    }
 }
 
 impl StateView for std::sync::MutexGuard<'_, AppState> {
@@ -451,6 +526,10 @@ impl StateView for std::sync::MutexGuard<'_, AppState> {
 
     fn current_notification(&self) -> Option<&OtpNotification> {
         self.current_notification.as_ref()
+    }
+
+    fn debug_logs(&self) -> Vec<String> {
+        AppState::debug_logs(&*self)
     }
 }
 
@@ -483,6 +562,7 @@ impl Windows {
             .with_always_on_top(true)
             .with_skip_taskbar(true)
             .with_transparent(true)
+            .with_resizable(false)
             .with_window_icon(Some(app_window_icon.clone()))
             .with_inner_size(LogicalSize::new(OVERLAY_WIDTH, OVERLAY_HEIGHT))
             .build(event_loop)
@@ -510,8 +590,9 @@ impl Windows {
         let settings_window = WindowBuilder::new()
             .with_title(SETTINGS_HTML_TITLE)
             .with_visible(true)
+            .with_resizable(false)
             .with_window_icon(Some(app_window_icon.clone()))
-            .with_inner_size(LogicalSize::new(540.0, 640.0))
+            .with_inner_size(LogicalSize::new(900.0, 720.0))
             .build(event_loop)
             .context("failed to build settings window")?;
 
@@ -701,19 +782,13 @@ struct SettingsSnapshot {
     copy_button_enabled: bool,
     launch_on_startup: bool,
     last_masked_code: Option<String>,
+    debug_logs: Vec<String>,
 }
 
 impl SettingsSnapshot {
     fn from_state(state: &impl StateView) -> Self {
         Self {
-            session_state: match state.session_state() {
-                MailSessionState::Unauthenticated => "Sign-in required",
-                MailSessionState::Restoring => "Restoring session",
-                MailSessionState::Authenticated => "Monitoring active",
-                MailSessionState::Expired => "Session expired",
-                MailSessionState::Error => "Attention needed",
-                MailSessionState::Paused => "Monitoring paused",
-            },
+            session_state: session_state_label(state.session_state()),
             autostart_status: if state.config().launch_on_startup {
                 "Enabled"
             } else {
@@ -726,6 +801,7 @@ impl SettingsSnapshot {
             last_masked_code: state
                 .current_notification()
                 .map(|notification| notification.masked_code.clone()),
+            debug_logs: state.debug_logs(),
         }
     }
 }
@@ -734,12 +810,84 @@ fn proton_monitor_script(poll_interval_seconds: u64) -> String {
     format!(
         r#"
 (() => {{
+  const OTP_TERMS = /(code|verification|2fa|two-factor|two factor|one-time|one time|otp|security|passcode|sign in|signin)/i;
+
+  const normalizeBlock = (value) => value
+    .replace(/\u00a0/g, " ")
+    .replace(/\r/g, "\n")
+    .replace(/[ \t]+/g, " ")
+    .replace(/\n{{3,}}/g, "\n\n")
+    .trim();
+
+  const isVisible = (element) => {{
+    if (!element || typeof element.getClientRects !== "function") {{
+      return false;
+    }}
+    return element.getClientRects().length > 0;
+  }};
+
+  const collectRelevantText = () => {{
+    const selectors = [
+      '[data-testid*="message"]',
+      '[data-testid*="conversation"]',
+      '[data-testid*="item"]',
+      '[role="main"] article',
+      '[role="main"] section',
+      'main article',
+      'main section',
+      '[role="main"]',
+      'main'
+    ];
+
+    const blocks = [];
+    const seen = new Set();
+    const maybeAddBlock = (rawText) => {{
+      const normalized = normalizeBlock(rawText || "");
+      if (normalized.length < 12 || seen.has(normalized)) {{
+        return;
+      }}
+      if (!OTP_TERMS.test(normalized) && !/\d{{4,8}}/.test(normalized)) {{
+        return;
+      }}
+      seen.add(normalized);
+      blocks.push(normalized);
+    }};
+
+    for (const selector of selectors) {{
+      const nodes = document.querySelectorAll(selector);
+      for (const node of nodes) {{
+        if (!isVisible(node)) {{
+          continue;
+        }}
+        maybeAddBlock(node.innerText || node.textContent || "");
+        if (blocks.length >= 8) {{
+          return blocks.join("\n\n");
+        }}
+      }}
+    }}
+
+    const bodyText = normalizeBlock(document.body?.innerText || "");
+    if (blocks.length) {{
+      return blocks.join("\n\n").slice(0, 40000);
+    }}
+    return bodyText.slice(0, 40000);
+  }};
+
+  const collectSnapshotTitle = (snapshotText) => {{
+    const firstUsefulLine = snapshotText
+      .split(/\n+/)
+      .map((line) => normalizeBlock(line))
+      .find((line) => line.length >= 6);
+    return firstUsefulLine || document.title || "Proton Mail";
+  }};
+
   const sendSnapshot = () => {{
+    const snapshotText = collectRelevantText();
     const payload = {{
       kind: "snapshot",
       url: window.location.href,
-      title: document.title || "Proton Mail",
-      text: (document.body?.innerText || "").slice(0, 12000)
+      title: collectSnapshotTitle(snapshotText),
+      text: snapshotText
     }};
     window.ipc.postMessage(JSON.stringify(payload));
   }};
@@ -760,6 +908,7 @@ fn proton_monitor_script(poll_interval_seconds: u64) -> String {
 
 fn overlay_html() -> String {
     let app_icon_url = app_icon_data_url();
+    let app_version = format!("v{}", env!("CARGO_PKG_VERSION"));
     let mut html = String::from(
         r#"<!doctype html>
 <html>
@@ -774,18 +923,14 @@ fn overlay_html() -> String {
         r#"
       :root {
         color-scheme: dark;
-        --bg: #081221;
-        --panel: rgba(10, 21, 41, 0.98);
-        --panel-strong: rgba(12, 24, 46, 0.98);
-        --panel-border: rgba(129, 154, 196, 0.2);
-        --panel-outline: rgba(255, 255, 255, 0.05);
-        --text: #f8fbff;
-        --muted: #9aaac5;
-        --accent-strong: #6d4aff;
-        --accent-soft: rgba(109, 74, 255, 0.12);
-        --shadow: 0 22px 44px rgba(2, 8, 20, 0.42);
-        --font: "Arizona Sans Local", "Ubuntu Local", "Segoe UI", sans-serif;
-        --font-display: "Arizona Flare Local", "Arizona Sans Local", "Ubuntu Local", "Segoe UI", sans-serif;
+        --bg: #0f1115;
+        --panel: rgba(15, 17, 21, 0.98);
+        --surface: rgba(255, 255, 255, 0.03);
+        --border: #1e2128;
+        --text: #e2e8f0;
+        --muted: #64748b;
+        --accent: #8b5cf6;
+        --font: "Segoe UI", "Ubuntu Local", sans-serif;
       }
       * {
         box-sizing: border-box;
@@ -799,7 +944,7 @@ fn overlay_html() -> String {
         font-family: var(--font);
       }
       body {
-        padding: 16px;
+        padding: 14px;
       }
       .shell {
         width: 100%;
@@ -809,25 +954,14 @@ fn overlay_html() -> String {
         justify-content: stretch;
       }
       .card {
-        position: relative;
         width: 100%;
         min-height: 100%;
-        padding: 18px 18px 16px;
-        border-radius: 24px;
-        border: 1px solid var(--panel-border);
+        padding: 16px 16px 14px;
+        border-radius: 22px;
+        border: 1px solid var(--border);
         background: var(--panel);
         color: var(--text);
-        box-shadow: var(--shadow);
-        overflow: hidden;
         display: none;
-      }
-      .card::before {
-        content: "";
-        position: absolute;
-        inset: 1px;
-        border-radius: 23px;
-        border: 1px solid var(--panel-outline);
-        pointer-events: none;
       }
       .brand-row {
         display: flex;
@@ -841,73 +975,74 @@ fn overlay_html() -> String {
         gap: 12px;
       }
       .brand-mark {
-        width: 20px;
-        height: 20px;
-        border-radius: 7px;
+        width: 18px;
+        height: 18px;
+        border-radius: 6px;
         display: block;
       }
       .brand-label {
-        font-size: 11px;
-        letter-spacing: 0.14em;
-        text-transform: uppercase;
-        color: var(--muted);
+        color: #ffffff;
+        font-size: 16px;
+        font-weight: 400;
+        letter-spacing: -0.02em;
       }
-      .time-pill {
-        padding: 6px 10px;
-        border-radius: 999px;
-        border: 1px solid rgba(129, 154, 196, 0.18);
-        background: rgba(255, 255, 255, 0.04);
+      .version {
         color: var(--muted);
-        font-size: 12px;
+        font-size: 10px;
+        font-weight: 500;
+        letter-spacing: 0.22em;
+        text-transform: uppercase;
+        border-bottom: 1px solid var(--border);
+        padding-bottom: 4px;
       }
       .headline {
-        margin-top: 14px;
-        font-size: 14px;
-        font-family: var(--font);
-        font-weight: 450;
-        color: #cbd8ec;
+        margin-top: 12px;
+        color: var(--muted);
+        font-size: 13px;
       }
       .source {
-        margin-top: 6px;
-        font-size: 18px;
-        font-weight: 500;
+        margin-top: 4px;
+        color: #ffffff;
+        font-size: 16px;
+        font-weight: 400;
         line-height: 1.35;
       }
       .code-row {
-        margin-top: 16px;
+        margin-top: 14px;
         display: flex;
         align-items: center;
         gap: 10px;
       }
       .code {
         flex: 1;
-        padding: 14px 16px;
-        border-radius: 18px;
-        border: 1px solid rgba(109, 74, 255, 0.22);
-        background: var(--panel-strong);
-        font-size: 30px;
-        font-weight: 500;
+        padding: 13px 16px;
+        border-radius: 16px;
+        border: 1px solid var(--border);
+        background: var(--surface);
+        color: #ffffff;
+        font-size: 28px;
+        font-weight: 400;
         letter-spacing: 0.2em;
         text-align: center;
       }
       button {
         appearance: none;
-        border: 0;
-        border-radius: 16px;
-        padding: 12px 14px;
+        border: 1px solid transparent;
+        border-radius: 999px;
+        padding: 10px 16px;
         min-width: 88px;
-        background: rgba(255, 255, 255, 0.07);
-        color: var(--text);
+        background: transparent;
+        color: var(--muted);
         font-family: var(--font);
-        font-size: 14px;
-        font-weight: 500;
+        font-size: 12px;
+        font-weight: 400;
         cursor: pointer;
       }
       button:hover {
-        background: rgba(255, 255, 255, 0.11);
+        color: #ffffff;
       }
       .toggle {
-        min-width: 92px;
+        min-width: 84px;
       }
       .meta {
         margin-top: 12px;
@@ -918,17 +1053,22 @@ fn overlay_html() -> String {
         font-size: 12px;
       }
       .actions {
-        margin-top: 16px;
+        margin-top: 14px;
         display: flex;
-        justify-content: flex-end;
+        align-items: center;
         gap: 10px;
       }
-      .ghost {
-        background: rgba(255, 255, 255, 0.06);
-      }
       .primary {
-        background: var(--accent-strong);
-        border: 1px solid rgba(134, 112, 255, 0.32);
+        padding: 10px 18px;
+        border-color: rgba(255, 255, 255, 0.1);
+        background: rgba(255, 255, 255, 0.05);
+        color: #ffffff;
+      }
+      .primary:hover {
+        background: rgba(255, 255, 255, 0.1);
+      }
+      .spacer {
+        flex: 1;
       }
     </style>
   </head>
@@ -938,11 +1078,11 @@ fn overlay_html() -> String {
         <div class="brand-row">
           <div class="brand">
             <img class="brand-mark" src="" alt="ProtonCode icon" id="brand-mark" />
-            <div class="brand-label">ProtonCode Notification</div>
+            <div class="brand-label">ProtonCode</div>
           </div>
-          <div class="time-pill" id="received-at">Now</div>
+          <div class="version">__APP_VERSION__</div>
         </div>
-        <div class="headline">New one-time passcode detected</div>
+        <div class="headline" id="received-at">New notification</div>
         <div class="source" id="source">Waiting for the next code</div>
         <div class="code-row">
           <div class="code" id="code">******</div>
@@ -953,7 +1093,8 @@ fn overlay_html() -> String {
           <span>Copied only on request.</span>
         </div>
         <div class="actions">
-          <button class="ghost" id="dismiss" type="button">Dismiss</button>
+          <button id="dismiss" type="button">Dismiss</button>
+          <div class="spacer"></div>
           <button class="primary" id="copy" type="button">Copy Code</button>
         </div>
       </div>
@@ -1025,10 +1166,12 @@ fn overlay_html() -> String {
     );
 
     html.replace("__APP_ICON__", &app_icon_url)
+        .replace("__APP_VERSION__", &app_version)
 }
 
 fn settings_html() -> String {
     let app_icon_url = app_icon_data_url();
+    let app_version = format!("v{}", env!("CARGO_PKG_VERSION"));
     let mut html = String::from(
         r#"<!doctype html>
 <html>
@@ -1043,328 +1186,428 @@ fn settings_html() -> String {
         r#"
       :root {
         color-scheme: dark;
-        --bg: #081221;
-        --panel: rgba(10, 21, 41, 0.98);
-        --panel-border: rgba(129, 154, 196, 0.18);
-        --panel-outline: rgba(255, 255, 255, 0.05);
-        --surface: rgba(12, 24, 46, 0.88);
-        --surface-strong: rgba(14, 28, 52, 0.96);
-        --text: #f8fbff;
-        --muted: #9aaac5;
-        --accent-strong: #6d4aff;
-        --field-border: rgba(129, 154, 196, 0.18);
-        --font: "Arizona Sans Local", "Ubuntu Local", "Segoe UI", sans-serif;
-        --font-display: "Arizona Flare Local", "Arizona Sans Local", "Ubuntu Local", "Segoe UI", sans-serif;
+        --bg: #0f1115;
+        --border: #1e2128;
+        --muted: #64748b;
+        --text: #e2e8f0;
+        --accent: #8b5cf6;
+        --font: "Segoe UI", "Ubuntu Local", sans-serif;
       }
       * {
         box-sizing: border-box;
       }
-      html, body {
+      html,
+      body {
         margin: 0;
         min-height: 100%;
+        background: var(--bg);
         color: var(--text);
         font-family: var(--font);
-        background: var(--bg);
+        -webkit-font-smoothing: antialiased;
       }
       body {
-        padding: 30px;
-      }
-      .app {
-        max-width: 620px;
-        margin: 0 auto;
-        padding: 28px;
-        border-radius: 28px;
-        border: 1px solid var(--panel-border);
-        background: var(--panel);
-        box-shadow: 0 28px 80px rgba(2, 10, 25, 0.42);
-        position: relative;
-        overflow: hidden;
-      }
-      .app::before {
-        content: "";
-        position: absolute;
-        inset: 1px;
-        border-radius: 27px;
-        border: 1px solid var(--panel-outline);
-        pointer-events: none;
-      }
-      .hero {
-        display: flex;
-        align-items: flex-start;
-        justify-content: space-between;
-        gap: 18px;
-      }
-      .brand {
+        min-height: 100vh;
         display: flex;
         align-items: center;
-        gap: 14px;
+        justify-content: center;
+        padding: 48px;
       }
-      .brand-mark {
-        width: 44px;
-        height: 44px;
-        border-radius: 14px;
-        display: block;
+      ::selection {
+        background: rgba(139, 92, 246, 0.3);
       }
-      .eyebrow {
-        margin: 0 0 6px;
-        font-size: 11px;
-        letter-spacing: 0.16em;
-        text-transform: uppercase;
-        color: var(--muted);
+      main {
+        width: 100%;
+        max-width: 760px;
+        display: flex;
+        flex-direction: column;
+        gap: 72px;
+      }
+      header {
+        display: flex;
+        align-items: flex-end;
+        justify-content: space-between;
+        gap: 24px;
       }
       h1 {
         margin: 0;
-        font-size: 32px;
-        font-family: var(--font-display);
-        font-weight: 450;
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        color: #ffffff;
+        font-size: 24px;
+        font-weight: 400;
         letter-spacing: -0.02em;
       }
-      .lede {
-        margin: 10px 0 0;
-        max-width: 420px;
-        color: #c8d5e7;
-        line-height: 1.55;
-      }
-      .hero-badge {
-        padding: 10px 14px;
-        border-radius: 16px;
-        background: rgba(255, 255, 255, 0.04);
-        border: 1px solid rgba(129, 154, 196, 0.14);
-        color: #c8d5e7;
-        font-size: 12px;
-        text-align: right;
-      }
-      .status-grid {
-        margin-top: 24px;
-        display: grid;
-        grid-template-columns: repeat(3, minmax(0, 1fr));
-        gap: 12px;
-      }
-      .status-card {
-        padding: 16px;
-        border-radius: 20px;
-        background: var(--surface);
-        border: 1px solid rgba(129, 154, 196, 0.14);
-      }
-      .status-card span {
+      .brand-mark {
+        width: 22px;
+        height: 22px;
         display: block;
+        border-radius: 7px;
       }
-      .status-label {
-        margin-bottom: 8px;
+      .session-state {
+        margin: 6px 0 0;
         color: var(--muted);
-        font-size: 12px;
-        letter-spacing: 0.08em;
+        font-size: 14px;
+      }
+      .version {
+        color: var(--muted);
+        font-size: 10px;
+        font-weight: 500;
+        letter-spacing: 0.26em;
+        text-transform: uppercase;
+        border-bottom: 1px solid var(--border);
+        padding-bottom: 4px;
+        white-space: nowrap;
+      }
+      .settings-grid {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+        column-gap: 80px;
+        row-gap: 64px;
+      }
+      .number-group {
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+      }
+      .number-label {
+        color: var(--muted);
+        font-size: 11px;
+        letter-spacing: 0.16em;
         text-transform: uppercase;
       }
-      .status-value {
-        color: var(--text);
-        font-size: 15px;
-        line-height: 1.45;
-      }
-      .section {
-        margin-top: 26px;
-        padding: 20px;
-        border-radius: 22px;
-        background: var(--surface-strong);
-        border: 1px solid rgba(129, 154, 196, 0.14);
-      }
-      .section-title {
-        margin: 0 0 6px;
-        font-size: 18px;
-        font-family: var(--font);
-        font-weight: 500;
-      }
-      .section-copy {
-        margin: 0 0 18px;
-        color: var(--muted);
-        line-height: 1.5;
-      }
-      .field-grid {
-        display: grid;
-        grid-template-columns: repeat(2, minmax(0, 1fr));
-        gap: 14px;
-      }
-      label.field-label {
-        display: block;
-        margin: 0 0 8px;
-        color: #d7e3f8;
-        font-size: 13px;
-      }
-      .field-hint {
-        display: block;
-        margin-top: 6px;
-        color: var(--muted);
-        font-size: 12px;
+      .number-input-row {
+        display: inline-flex;
+        align-items: flex-end;
+        gap: 10px;
       }
       input[type="number"] {
-        width: 100%;
-        padding: 13px 14px;
-        border-radius: 16px;
-        border: 1px solid var(--field-border);
-        background: rgba(6, 18, 38, 0.88);
-        color: var(--text);
+        width: 58px;
+        padding: 0 0 6px;
+        border: 0;
+        border-bottom: 1px solid transparent;
+        outline: none;
+        background: transparent;
+        color: #ffffff;
         font-family: var(--font);
-        font-size: 15px;
+        font-size: 48px;
+        font-weight: 300;
+        line-height: 1;
+        transition: border-color 0.2s ease;
+        appearance: textfield;
       }
-      .toggle-list {
-        margin-top: 18px;
-        display: grid;
-        gap: 12px;
+      input[type="number"]::-webkit-inner-spin-button,
+      input[type="number"]::-webkit-outer-spin-button {
+        -webkit-appearance: none;
+        margin: 0;
+      }
+      .number-group:hover input[type="number"],
+      input[type="number"]:focus {
+        border-bottom-color: var(--border);
+      }
+      .number-unit {
+        padding-bottom: 10px;
+        color: var(--muted);
+        font-size: 14px;
+        font-weight: 300;
+      }
+      .right-column {
+        display: flex;
+        flex-direction: column;
+        gap: 32px;
+        padding-top: 4px;
       }
       .toggle-row {
         display: flex;
-        align-items: flex-start;
-        gap: 12px;
-        padding: 14px 16px;
-        border-radius: 18px;
-        background: rgba(255, 255, 255, 0.04);
-        border: 1px solid rgba(143, 189, 255, 0.08);
+        align-items: center;
+        justify-content: space-between;
+        gap: 20px;
+        cursor: pointer;
       }
-      .toggle-row input {
-        margin: 3px 0 0;
-        inline-size: 16px;
-        block-size: 16px;
-        accent-color: var(--accent-strong);
-      }
-      .toggle-copy {
-        display: block;
+      .toggle-label {
         color: var(--muted);
-        font-size: 12px;
-        line-height: 1.5;
+        font-size: 14px;
+        transition: color 0.2s ease;
       }
-      .actions {
-        margin-top: 24px;
+      .toggle-row:hover .toggle-label {
+        color: #ffffff;
+      }
+      .toggle-input {
+        position: absolute;
+        opacity: 0;
+        pointer-events: none;
+      }
+      .toggle-switch {
+        width: 32px;
+        height: 18px;
+        flex-shrink: 0;
+        position: relative;
+        border-radius: 999px;
+        background: var(--border);
+        transition: background 0.2s ease;
+      }
+      .toggle-switch::after {
+        content: "";
+        position: absolute;
+        top: 3px;
+        left: 3px;
+        width: 12px;
+        height: 12px;
+        border-radius: 50%;
+        background: var(--muted);
+        transition: all 0.2s ease;
+      }
+      .toggle-input:checked + .toggle-switch {
+        background: var(--accent);
+      }
+      .toggle-input:checked + .toggle-switch::after {
+        left: 17px;
+        background: #ffffff;
+      }
+      .last-code {
         display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 20px;
+      }
+      .last-code-label {
+        color: var(--muted);
+        font-size: 14px;
+      }
+      .last-code-value {
+        color: var(--accent);
+        font-size: 14px;
+        font-weight: 500;
+        letter-spacing: 0.22em;
+        text-transform: uppercase;
+        text-align: right;
+      }
+      .last-code-value.empty {
+        color: var(--muted);
+        font-weight: 400;
+        letter-spacing: 0;
+        text-transform: none;
+      }
+      footer {
+        display: flex;
+        align-items: center;
+        gap: 16px;
+        padding-top: 40px;
+        border-top: 1px solid rgba(30, 33, 40, 0.5);
         flex-wrap: wrap;
-        gap: 10px;
       }
       button {
         appearance: none;
         border: 0;
-        border-radius: 16px;
-        padding: 13px 18px;
-        background: rgba(255, 255, 255, 0.08);
-        color: var(--text);
+        background: transparent;
+        color: var(--muted);
         font-family: var(--font);
-        font-size: 14px;
-        font-weight: 500;
+        font-size: 12px;
         cursor: pointer;
+        transition: color 0.2s ease, background 0.2s ease, border-color 0.2s ease;
       }
       button:hover {
-        background: rgba(255, 255, 255, 0.12);
+        color: #ffffff;
       }
-      .primary {
-        background: var(--accent-strong);
-        border: 1px solid rgba(134, 112, 255, 0.32);
+      .primary-action {
+        padding: 10px 20px;
+        border-radius: 999px;
+        border: 1px solid rgba(255, 255, 255, 0.1);
+        background: rgba(255, 255, 255, 0.05);
+        color: #ffffff;
       }
-      @media (max-width: 640px) {
+      .primary-action:hover {
+        background: rgba(255, 255, 255, 0.1);
+      }
+      .spacer {
+        flex: 1;
+      }
+      .hide-button {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+      }
+      .hide-glyph {
+        font-size: 14px;
+        line-height: 1;
+      }
+      .debug-panel {
+        display: grid;
+        gap: 10px;
+        padding-top: 8px;
+        border-top: 1px solid rgba(30, 33, 40, 0.5);
+      }
+      .debug-header {
+        color: var(--muted);
+        font-size: 11px;
+        font-weight: 500;
+        letter-spacing: 0.16em;
+        text-transform: uppercase;
+      }
+      .debug-list {
+        display: grid;
+        gap: 8px;
+      }
+      .debug-entry {
+        padding: 10px 12px;
+        border-radius: 14px;
+        border: 1px solid var(--border);
+        background: rgba(255, 255, 255, 0.03);
+        color: #b7c4d8;
+        font-family: "SFMono-Regular", "Consolas", "Liberation Mono", monospace;
+        font-size: 12px;
+        line-height: 1.45;
+        white-space: pre-wrap;
+        word-break: break-word;
+      }
+      .debug-empty {
+        color: var(--muted);
+        font-size: 12px;
+      }
+      @media (max-width: 720px) {
         body {
-          padding: 18px;
+          padding: 28px;
         }
-        .app {
-          padding: 22px;
+        main {
+          gap: 56px;
         }
-        .hero,
-        .status-grid,
-        .field-grid {
-          grid-template-columns: 1fr;
-          display: grid;
+        header,
+        .settings-grid,
+        footer {
+          display: flex;
+          flex-direction: column;
+          align-items: flex-start;
         }
-        .hero {
-          gap: 16px;
+        .settings-grid {
+          gap: 40px;
         }
-        .hero-badge {
-          text-align: left;
+        .right-column {
+          width: 100%;
+          gap: 24px;
+        }
+        .toggle-row,
+        .last-code {
+          width: 100%;
+        }
+        .spacer {
+          display: none;
         }
       }
     </style>
   </head>
   <body>
-    <div class="app">
-      <div class="hero">
+    <main>
+      <header>
         <div>
-          <div class="brand">
+          <h1>
             <img class="brand-mark" src="" alt="ProtonCode icon" id="brand-mark" />
-            <div>
-              <p class="eyebrow">Desktop Control Center</p>
-              <h1>ProtonCode</h1>
+            <span>ProtonCode</span>
+          </h1>
+          <p class="session-state" id="session-state">Monitoring active</p>
+        </div>
+        <div class="version">__APP_VERSION__</div>
+      </header>
+
+      <section class="settings-grid">
+        <div class="left-column">
+          <div class="number-group">
+            <label class="number-label" for="poll-interval">Interval</label>
+            <div class="number-input-row">
+              <input id="poll-interval" type="number" min="5" max="30" />
+              <span class="number-unit">seconds</span>
             </div>
           </div>
-          <p class="lede">Monitor Proton Mail for one-time passcodes with a calmer, polished desktop experience. Notifications stay masked until you choose to reveal or copy them.</p>
-        </div>
-        <div class="hero-badge">Secure desktop notifications<br />for Proton Mail sign-in codes</div>
-      </div>
 
-      <div class="status-grid">
-        <div class="status-card">
-          <span class="status-label">Session</span>
-          <span class="status-value" id="session-state">Restoring session</span>
-        </div>
-        <div class="status-card">
-          <span class="status-label">Launch at Sign-In</span>
-          <span class="status-value" id="autostart-status">Disabled</span>
-        </div>
-        <div class="status-card">
-          <span class="status-label">Last Masked Code</span>
-          <span class="status-value" id="last-code">No code received yet</span>
-        </div>
-      </div>
-
-      <div class="section">
-        <h2 class="section-title">Monitoring Preferences</h2>
-        <p class="section-copy">Adjust how frequently ProtonCode checks for updates and how long notification cards remain visible.</p>
-
-        <div class="field-grid">
-          <div>
-            <label class="field-label" for="poll-interval">Monitoring Interval</label>
-            <input id="poll-interval" type="number" min="5" max="30" />
-            <span class="field-hint">Accepted range: 5 to 30 seconds.</span>
-          </div>
-          <div>
-            <label class="field-label" for="notification-duration">Notification Duration</label>
-            <input id="notification-duration" type="number" min="5" max="15" />
-            <span class="field-hint">Accepted range: 5 to 15 seconds.</span>
+          <div class="number-group" style="margin-top: 36px;">
+            <label class="number-label" for="notification-duration">Duration</label>
+            <div class="number-input-row">
+              <input id="notification-duration" type="number" min="5" max="15" />
+              <span class="number-unit">seconds</span>
+            </div>
           </div>
         </div>
 
-        <div class="toggle-list">
+        <div class="right-column">
           <label class="toggle-row" for="copy-button-enabled">
-            <input id="copy-button-enabled" type="checkbox" />
+            <span class="toggle-label">Allow Copy</span>
             <span>
-              <strong>Allow Copy from Notifications</strong>
-              <span class="toggle-copy">Show the copy action on notification cards when you want a faster clipboard workflow.</span>
+              <input class="toggle-input" id="copy-button-enabled" type="checkbox" />
+              <span class="toggle-switch"></span>
             </span>
           </label>
 
           <label class="toggle-row" for="launch-on-startup">
-            <input id="launch-on-startup" type="checkbox" />
+            <span class="toggle-label">Launch at Sign-In</span>
             <span>
-              <strong>Launch with Windows</strong>
-              <span class="toggle-copy">Start ProtonCode automatically after Windows sign-in and keep it ready in the tray.</span>
+              <input class="toggle-input" id="launch-on-startup" type="checkbox" />
+              <span class="toggle-switch"></span>
             </span>
           </label>
-        </div>
 
-        <div class="actions">
-          <button class="primary" id="save">Save Changes</button>
-          <button id="test-notification">Test Notification</button>
-          <button id="login">Open Proton Mail</button>
-          <button id="close">Hide Window</button>
+          <div class="last-code">
+            <span class="last-code-label">Last Code</span>
+            <span class="last-code-value empty" id="last-code">No code received yet</span>
+          </div>
         </div>
-      </div>
-    </div>
+      </section>
+
+      <footer>
+        <button class="primary-action" id="save" type="button">Save Changes</button>
+        <button id="login" type="button">Open Proton Mail</button>
+        <div class="spacer"></div>
+        <button class="hide-button" id="close" type="button">
+          <span class="hide-glyph">−</span>
+          <span>Hide Window</span>
+        </button>
+      </footer>
+
+      <section class="debug-panel" id="debug-panel" hidden>
+        <div class="debug-header">Debug Logs</div>
+        <div class="debug-list" id="debug-list"></div>
+      </section>
+    </main>
     <script>
       document.getElementById("brand-mark").src = "__APP_ICON__";
 
+      const debugState = {
+        visible: false,
+        logs: []
+      };
+
       const elements = {
         sessionState: document.getElementById("session-state"),
-        autostartStatus: document.getElementById("autostart-status"),
         lastCode: document.getElementById("last-code"),
         pollInterval: document.getElementById("poll-interval"),
         notificationDuration: document.getElementById("notification-duration"),
         copyEnabled: document.getElementById("copy-button-enabled"),
-        launchOnStartup: document.getElementById("launch-on-startup")
+        launchOnStartup: document.getElementById("launch-on-startup"),
+        debugPanel: document.getElementById("debug-panel"),
+        debugList: document.getElementById("debug-list")
       };
+
+      function renderDebugPanel() {
+        elements.debugPanel.hidden = !debugState.visible;
+        elements.debugList.replaceChildren();
+
+        if (!debugState.visible) {
+          return;
+        }
+
+        if (!debugState.logs.length) {
+          const emptyState = document.createElement("div");
+          emptyState.className = "debug-empty";
+          emptyState.textContent = "No debug entries yet.";
+          elements.debugList.appendChild(emptyState);
+          return;
+        }
+
+        for (const entry of debugState.logs) {
+          const item = document.createElement("div");
+          item.className = "debug-entry";
+          item.textContent = entry;
+          elements.debugList.appendChild(item);
+        }
+      }
 
       document.getElementById("save").addEventListener("click", () => {
         window.ipc.postMessage(JSON.stringify({
@@ -1380,23 +1623,44 @@ fn settings_html() -> String {
         window.ipc.postMessage(JSON.stringify({ kind: "login_window" }));
       });
 
-      document.getElementById("test-notification").addEventListener("click", () => {
-        window.ipc.postMessage(JSON.stringify({ kind: "test_notification" }));
-      });
-
       document.getElementById("close").addEventListener("click", () => {
         window.ipc.postMessage(JSON.stringify({ kind: "hide_status" }));
       });
 
+      window.addEventListener("keydown", (event) => {
+        const modifierKeysPressed = (event.ctrlKey || event.metaKey)
+          && event.altKey
+          && event.shiftKey;
+
+        if (!modifierKeysPressed) {
+          return;
+        }
+
+        if (event.code === "KeyD") {
+          event.preventDefault();
+          window.ipc.postMessage(JSON.stringify({ kind: "test_notification" }));
+          return;
+        }
+
+        if (event.code === "KeyL") {
+          event.preventDefault();
+          debugState.visible = !debugState.visible;
+          renderDebugPanel();
+        }
+      });
+
       window.__PROTON2FA_STATUS = {
         render(payload) {
+          const hasCode = Boolean(payload.last_masked_code);
           elements.sessionState.textContent = payload.session_state;
-          elements.autostartStatus.textContent = payload.autostart_status;
           elements.lastCode.textContent = payload.last_masked_code || "No code received yet";
+          elements.lastCode.classList.toggle("empty", !hasCode);
           elements.pollInterval.value = payload.poll_interval_seconds;
           elements.notificationDuration.value = payload.notification_duration_seconds;
           elements.copyEnabled.checked = payload.copy_button_enabled;
           elements.launchOnStartup.checked = payload.launch_on_startup;
+          debugState.logs = payload.debug_logs || [];
+          renderDebugPanel();
         }
       };
     </script>
@@ -1406,6 +1670,40 @@ fn settings_html() -> String {
     );
 
     html.replace("__APP_ICON__", &app_icon_url)
+        .replace("__APP_VERSION__", &app_version)
+}
+
+#[cfg(test)]
+mod desktop_tests {
+    use super::{MailSessionState, ProtonSnapshot, infer_session_state};
+
+    #[test]
+    fn mail_page_is_not_marked_signed_out_when_message_mentions_sign_in() {
+        let snapshot = ProtonSnapshot {
+            url: "https://mail.proton.me/u/0/inbox".to_owned(),
+            title: "Inbox | Proton Mail".to_owned(),
+            text: "Your verification code is 123456. Use it to sign in.".to_owned(),
+        };
+
+        assert_eq!(
+            infer_session_state(&snapshot),
+            MailSessionState::Authenticated
+        );
+    }
+
+    #[test]
+    fn account_login_page_is_marked_unauthenticated() {
+        let snapshot = ProtonSnapshot {
+            url: "https://account.proton.me/login".to_owned(),
+            title: "Proton Login".to_owned(),
+            text: "Sign in to Proton".to_owned(),
+        };
+
+        assert_eq!(
+            infer_session_state(&snapshot),
+            MailSessionState::Unauthenticated
+        );
+    }
 }
 
 fn embedded_font_face_css() -> &'static str {
