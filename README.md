@@ -21,8 +21,6 @@
 
 protoncode is a windows tray app that watches a live proton mail session and surfaces otp emails as masked notifications near the bottom-right corner of the screen. it is built for people who need quick code access without opening mail every time or leaking codes during screen sharing.
 
-last reviewed: 2026-03-13
-
 ## features
 
 - tray-first windows app with a hidden-on-autostart launch path
@@ -49,8 +47,7 @@ cargo run --target x86_64-pc-windows-msvc
 
 ### from github releases
 
-- download the latest windows zip from releases
-- extract it
+- download the latest windows `.exe` from releases
 - run `protoncode.exe`
 - enable `launch on windows sign-in` from the status window if you want autostart
 
@@ -75,12 +72,6 @@ key settings:
 
 when autostart is enabled, protoncode writes a `protoncode` entry to the current-user windows run key and starts with `--autostart`, which forces a hidden-to-tray launch.
 
-## visuals
-
-- logo asset: [assets/protoncode-icon.png](assets/protoncode-icon.png)
-- release icon resource: [assets/protoncode.ico](assets/protoncode.ico)
-- screenshot placeholder: status window on the left, masked six-digit overlay on the bottom-right, proton login window hidden in tray mode
-
 ## development
 
 ```bash
@@ -98,7 +89,7 @@ cargo build --release --target x86_64-pc-windows-gnu
 
 - ci runs on pushes and pull requests
 - release-please manages version bumps and github releases from conventional commits
-- a release workflow builds `protoncode.exe` on windows and uploads a zip asset to the github release
+- a release workflow builds `protoncode.exe` on windows and uploads the `.exe` asset directly to the github release
 
 ## notes
 

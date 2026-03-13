@@ -26,14 +26,10 @@ jobs:
         shell: pwsh
         run: |
           $version = "${{ github.event.release.tag_name }}"
-          $root = "dist/protoncode-$version-windows-x86_64"
-          New-Item -ItemType Directory -Force -Path $root | Out-Null
-          Copy-Item "target/x86_64-pc-windows-msvc/release/protoncode.exe" "$root/protoncode.exe"
-          Copy-Item "README.md" "$root/README.md"
-          Copy-Item "assets/protoncode-icon.png" "$root/protoncode-icon.png"
-          Compress-Archive -Path "$root/*" -DestinationPath "$root.zip" -Force
+          New-Item -ItemType Directory -Force -Path "dist" | Out-Null
+          Copy-Item "target/x86_64-pc-windows-msvc/release/protoncode.exe" "dist/protoncode-$version-windows-x86_64.exe"
 
-      - name: upload release zip
+      - name: upload release exe
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/protoncode-*.zip
+          files: dist/protoncode-*.exe
