@@ -6,12 +6,13 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result, anyhow};
 use arboard::Clipboard;
+use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 use tao::dpi::{LogicalPosition, LogicalSize};
 use tao::event::{Event, StartCause, WindowEvent};
 use tao::event_loop::{ControlFlow, EventLoop, EventLoopBuilder, EventLoopProxy};
 use tao::platform::windows::WindowBuilderExtWindows;
-use tao::window::{Window, WindowBuilder};
+use tao::window::{Icon as TaoIcon, Window, WindowBuilder};
 use time::OffsetDateTime;
 use tracing::{error, info, warn};
 use tray_icon::TrayIconBuilder;
@@ -25,10 +26,12 @@ use crate::config::AppConfig;
 use crate::models::{MailSessionState, OtpCandidateEmail, OtpNotification};
 use crate::secrets::SecretStore;
 
-const SETTINGS_HTML_TITLE: &str = "protoncode status";
-const PROTON_LOGIN_TITLE: &str = "proton mail login";
-const OVERLAY_WIDTH: f64 = 360.0;
-const OVERLAY_HEIGHT: f64 = 172.0;
+const APP_NAME: &str = "ProtonCode";
+const SETTINGS_HTML_TITLE: &str = "ProtonCode";
+const PROTON_LOGIN_TITLE: &str = "Proton Mail - ProtonCode";
+const OVERLAY_WINDOW_TITLE: &str = "ProtonCode Notification";
+const OVERLAY_WIDTH: f64 = 420.0;
+const OVERLAY_HEIGHT: f64 = 236.0;
 
 pub fn run() -> Result<()> {
     let state = Arc::new(Mutex::new(AppState::load()?));
@@ -402,14 +405,17 @@ impl Windows {
             let state = lock_state(&state)?;
             state.config.clone()
         };
+        let app_window_icon =
+            native_window_icon().context("failed to create native window icon")?;
 
         let overlay_window = WindowBuilder::new()
-            .with_title("protoncode overlay")
+            .with_title(OVERLAY_WINDOW_TITLE)
             .with_visible(false)
             .with_decorations(false)
             .with_always_on_top(true)
             .with_skip_taskbar(true)
             .with_transparent(true)
+            .with_window_icon(Some(app_window_icon.clone()))
             .with_inner_size(LogicalSize::new(OVERLAY_WIDTH, OVERLAY_HEIGHT))
             .build(event_loop)
             .context("failed to build overlay window")?;
@@ -431,7 +437,8 @@ impl Windows {
         let settings_window = WindowBuilder::new()
             .with_title(SETTINGS_HTML_TITLE)
             .with_visible(true)
-            .with_inner_size(LogicalSize::new(440.0, 520.0))
+            .with_window_icon(Some(app_window_icon.clone()))
+            .with_inner_size(LogicalSize::new(540.0, 640.0))
             .build(event_loop)
             .context("failed to build settings window")?;
 
@@ -449,6 +456,7 @@ impl Windows {
         let proton_window = WindowBuilder::new()
             .with_title(PROTON_LOGIN_TITLE)
             .with_visible(true)
+            .with_window_icon(Some(app_window_icon))
             .with_inner_size(LogicalSize::new(1120.0, 820.0))
             .build(event_loop)
             .context("failed to build Proton login window")?;
@@ -500,10 +508,10 @@ struct AppTray {
 impl AppTray {
     fn build() -> Result<Self> {
         let menu = Menu::new();
-        let open_status = MenuItem::new("Open status", true, None);
-        let open_login = MenuItem::new("Open Proton login", true, None);
-        let pause_resume = MenuItem::new("Pause or resume monitoring", true, None);
-        let clear_session = MenuItem::new("Clear saved session state", true, None);
+        let open_status = MenuItem::new("Open ProtonCode", true, None);
+        let open_login = MenuItem::new("Open Proton Mail", true, None);
+        let pause_resume = MenuItem::new("Pause or Resume Monitoring", true, None);
+        let clear_session = MenuItem::new("Clear Saved Session", true, None);
         let quit = MenuItem::new("Quit", true, None);
 
         menu.append(&open_status)
@@ -520,7 +528,7 @@ impl AppTray {
         let icon = app_icon().context("failed to create tray icon")?;
         let tray = TrayIconBuilder::new()
             .with_menu(Box::new(menu))
-            .with_tooltip("protoncode")
+            .with_tooltip(APP_NAME)
             .with_icon(icon)
             .build()
             .context("failed to build tray icon")?;
@@ -618,12 +626,12 @@ impl SettingsSnapshot {
     fn from_state(state: &impl StateView) -> Self {
         Self {
             session_state: match state.session_state() {
-                MailSessionState::Unauthenticated => "Unauthenticated",
+                MailSessionState::Unauthenticated => "Sign-in required",
                 MailSessionState::Restoring => "Restoring session",
-                MailSessionState::Authenticated => "Authenticated",
-                MailSessionState::Expired => "Expired",
-                MailSessionState::Error => "Error",
-                MailSessionState::Paused => "Paused",
+                MailSessionState::Authenticated => "Monitoring active",
+                MailSessionState::Expired => "Session expired",
+                MailSessionState::Error => "Attention needed",
+                MailSessionState::Paused => "Monitoring paused",
             },
             autostart_status: if state.config().launch_on_startup {
                 "Enabled"
@@ -670,21 +678,37 @@ fn proton_monitor_script(poll_interval_seconds: u64) -> String {
 }
 
 fn overlay_html() -> String {
-    r#"
-<!doctype html>
+    let mut html = String::from(
+        r#"<!doctype html>
 <html>
   <head>
     <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
     <style>
+"#,
+    );
+    html.push_str(&embedded_font_face_css());
+    html.push_str(
+        r#"
       :root {
         color-scheme: dark;
-        --bg: #111827;
-        --panel: rgba(17, 24, 39, 0.96);
-        --panel-border: rgba(255, 255, 255, 0.08);
-        --text: #f8fafc;
-        --muted: #94a3b8;
-        --accent: #6d4aff;
-        --accent-soft: rgba(109, 74, 255, 0.16);
+        --bg: #06142c;
+        --panel: rgba(7, 20, 44, 0.94);
+        --panel-strong: rgba(9, 28, 61, 0.98);
+        --panel-border: rgba(143, 189, 255, 0.16);
+        --panel-outline: rgba(255, 255, 255, 0.05);
+        --text: #f8fbff;
+        --muted: #9eb2d1;
+        --accent: #8b5cf6;
+        --accent-strong: #6d4aff;
+        --accent-soft: rgba(139, 92, 246, 0.18);
+        --cyan-soft: rgba(80, 198, 255, 0.16);
+        --shadow: 0 22px 58px rgba(2, 10, 25, 0.44);
+        --font: "Arizona Sans Local", "Ubuntu Local", "Segoe UI", sans-serif;
+        --font-display: "Arizona Flare Local", "Arizona Sans Local", "Ubuntu Local", "Segoe UI", sans-serif;
+      }
+      * {
+        box-sizing: border-box;
       }
       html, body {
         margin: 0;
@@ -692,97 +716,170 @@ fn overlay_html() -> String {
         height: 100%;
         background: transparent;
         overflow: hidden;
-        font-family: "Segoe UI", "Inter", sans-serif;
+        font-family: var(--font);
       }
       body {
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        padding: 12px;
+        padding: 16px;
       }
-      .card {
+      .shell {
         width: 100%;
         height: 100%;
-        box-sizing: border-box;
-        padding: 18px;
-        border-radius: 22px;
+        display: flex;
+        align-items: stretch;
+        justify-content: stretch;
+      }
+      .card {
+        position: relative;
+        width: 100%;
+        min-height: 100%;
+        padding: 18px 18px 16px;
+        border-radius: 24px;
         border: 1px solid var(--panel-border);
         background:
-          radial-gradient(circle at top left, rgba(0, 174, 255, 0.18), transparent 35%),
-          radial-gradient(circle at bottom right, rgba(109, 74, 255, 0.24), transparent 42%),
-          var(--panel);
+          linear-gradient(135deg, rgba(80, 198, 255, 0.16), transparent 34%),
+          radial-gradient(circle at top right, rgba(230, 89, 173, 0.22), transparent 28%),
+          linear-gradient(180deg, rgba(15, 35, 72, 0.98) 0%, rgba(6, 20, 44, 0.98) 100%);
         color: var(--text);
-        box-shadow: 0 22px 60px rgba(15, 23, 42, 0.45);
+        box-shadow: var(--shadow);
+        overflow: hidden;
         display: none;
       }
-      .eyebrow {
-        font-size: 12px;
-        letter-spacing: 0.12em;
+      .card::before {
+        content: "";
+        position: absolute;
+        inset: 1px;
+        border-radius: 23px;
+        border: 1px solid var(--panel-outline);
+        pointer-events: none;
+      }
+      .brand-row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+      }
+      .brand {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+      }
+      .brand-mark {
+        width: 18px;
+        height: 18px;
+        border-radius: 6px;
+      }
+      .brand-label {
+        font-size: 11px;
+        letter-spacing: 0.14em;
         text-transform: uppercase;
         color: var(--muted);
       }
+      .time-pill {
+        padding: 6px 10px;
+        border-radius: 999px;
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        background: rgba(255, 255, 255, 0.05);
+        color: var(--muted);
+        font-size: 12px;
+      }
+      .headline {
+        margin-top: 14px;
+        font-size: 14px;
+        font-family: var(--font-display);
+        font-weight: 450;
+        color: #c7d8f3;
+      }
       .source {
-        margin-top: 10px;
-        font-size: 16px;
-        font-weight: 600;
+        margin-top: 6px;
+        font-size: 18px;
+        font-weight: 500;
+        line-height: 1.35;
       }
       .code-row {
-        margin-top: 14px;
+        margin-top: 16px;
         display: flex;
         align-items: center;
-        gap: 8px;
+        gap: 10px;
       }
       .code {
         flex: 1;
         padding: 14px 16px;
-        border-radius: 16px;
-        background: var(--accent-soft);
+        border-radius: 18px;
+        border: 1px solid rgba(139, 92, 246, 0.22);
+        background:
+          linear-gradient(180deg, rgba(139, 92, 246, 0.18), rgba(69, 39, 160, 0.12)),
+          rgba(12, 28, 58, 0.88);
         font-size: 30px;
-        font-weight: 700;
-        letter-spacing: 0.18em;
+        font-weight: 500;
+        letter-spacing: 0.2em;
+        text-align: center;
       }
       button {
+        appearance: none;
         border: 0;
-        border-radius: 14px;
-        padding: 11px 14px;
-        background: rgba(255, 255, 255, 0.09);
+        border-radius: 16px;
+        padding: 12px 14px;
+        min-width: 88px;
+        background: rgba(255, 255, 255, 0.07);
         color: var(--text);
+        font-family: var(--font);
         font-size: 14px;
+        font-weight: 500;
         cursor: pointer;
       }
+      button:hover {
+        background: rgba(255, 255, 255, 0.11);
+      }
+      .toggle {
+        min-width: 92px;
+      }
       .meta {
-        margin-top: 14px;
+        margin-top: 12px;
         display: flex;
         justify-content: space-between;
+        gap: 12px;
         color: var(--muted);
         font-size: 12px;
       }
       .actions {
-        margin-top: 14px;
+        margin-top: 16px;
         display: flex;
         justify-content: flex-end;
-        gap: 8px;
+        gap: 10px;
       }
-      .copy {
-        background: var(--accent);
+      .ghost {
+        background: rgba(255, 255, 255, 0.06);
+      }
+      .primary {
+        background: linear-gradient(135deg, var(--accent) 0%, var(--accent-strong) 100%);
+        box-shadow: 0 12px 24px rgba(109, 74, 255, 0.26);
       }
     </style>
   </head>
   <body>
-    <div class="card" id="card">
-      <div class="eyebrow">Proton-style OTP alert</div>
-      <div class="source" id="source">Waiting for code</div>
-      <div class="code-row">
-        <div class="code" id="code">******</div>
-        <button id="toggle" type="button" aria-label="Reveal code">Eye</button>
-      </div>
-      <div class="meta">
-        <span>Masked by default</span>
-        <span id="received-at">now</span>
-      </div>
-      <div class="actions">
-        <button id="dismiss" type="button">Dismiss</button>
-        <button class="copy" id="copy" type="button">Copy</button>
+    <div class="shell">
+      <div class="card" id="card">
+        <div class="brand-row">
+          <div class="brand">
+            <img class="brand-mark" src="" alt="ProtonCode icon" id="brand-mark" />
+            <div class="brand-label">ProtonCode Notification</div>
+          </div>
+          <div class="time-pill" id="received-at">Now</div>
+        </div>
+        <div class="headline">New one-time passcode detected</div>
+        <div class="source" id="source">Waiting for the next code</div>
+        <div class="code-row">
+          <div class="code" id="code">******</div>
+          <button class="toggle" id="toggle" type="button">Reveal</button>
+        </div>
+        <div class="meta">
+          <span>Codes stay masked until you reveal them.</span>
+          <span>Copied only on request.</span>
+        </div>
+        <div class="actions">
+          <button class="ghost" id="dismiss" type="button">Dismiss</button>
+          <button class="primary" id="copy" type="button">Copy Code</button>
+        </div>
       </div>
     </div>
     <script>
@@ -793,13 +890,16 @@ fn overlay_html() -> String {
         hideTimer: null,
       };
 
+      document.getElementById("brand-mark").src = "__APP_ICON__";
+
       const card = document.getElementById("card");
       const code = document.getElementById("code");
       const source = document.getElementById("source");
       const receivedAt = document.getElementById("received-at");
       const copy = document.getElementById("copy");
+      const toggle = document.getElementById("toggle");
 
-      document.getElementById("toggle").addEventListener("click", () => {
+      toggle.addEventListener("click", () => {
         state.revealed = !state.revealed;
         renderCode();
       });
@@ -814,12 +914,15 @@ fn overlay_html() -> String {
       });
 
       function renderCode() {
-        code.textContent = state.revealed ? state.rawCode : state.maskedCode;
+        const isRevealed = state.revealed;
+        code.textContent = isRevealed ? state.rawCode : state.maskedCode;
+        toggle.textContent = isRevealed ? "Hide" : "Reveal";
       }
 
       function hide() {
         card.style.display = "none";
         state.revealed = false;
+        renderCode();
       }
 
       window.__PROTON2FA_OVERLAY = {
@@ -842,121 +945,345 @@ fn overlay_html() -> String {
     </script>
   </body>
 </html>
-"#
-    .to_owned()
+"#,
+    );
+
+    html.replace("__APP_ICON__", &embedded_app_icon_data_url())
 }
 
 fn settings_html() -> String {
-    r#"
-<!doctype html>
+    let mut html = String::from(
+        r#"<!doctype html>
 <html>
   <head>
     <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
     <style>
+"#,
+    );
+    html.push_str(&embedded_font_face_css());
+    html.push_str(
+        r#"
       :root {
         color-scheme: dark;
-        --bg: #0f172a;
-        --panel: #111827;
-        --text: #f8fafc;
-        --muted: #94a3b8;
-        --accent: #6d4aff;
-        --accent-soft: rgba(109, 74, 255, 0.18);
+        --bg: #06142c;
+        --panel: rgba(7, 20, 44, 0.9);
+        --panel-border: rgba(143, 189, 255, 0.18);
+        --panel-outline: rgba(255, 255, 255, 0.05);
+        --surface: rgba(9, 24, 54, 0.82);
+        --surface-strong: rgba(12, 32, 67, 0.92);
+        --text: #f8fbff;
+        --muted: #a0b3d1;
+        --accent: #8b5cf6;
+        --accent-strong: #6d4aff;
+        --accent-soft: rgba(139, 92, 246, 0.18);
+        --cyan-soft: rgba(80, 198, 255, 0.14);
+        --field-border: rgba(154, 176, 212, 0.16);
+        --font: "Arizona Sans Local", "Ubuntu Local", "Segoe UI", sans-serif;
+        --font-display: "Arizona Flare Local", "Arizona Sans Local", "Ubuntu Local", "Segoe UI", sans-serif;
+      }
+      * {
+        box-sizing: border-box;
       }
       html, body {
         margin: 0;
-        background:
-          radial-gradient(circle at top left, rgba(0, 174, 255, 0.14), transparent 30%),
-          linear-gradient(160deg, #0b1220 0%, #121a2f 100%);
+        min-height: 100%;
         color: var(--text);
-        font-family: "Segoe UI", "Inter", sans-serif;
+        font-family: var(--font);
+        background:
+          radial-gradient(circle at top left, rgba(80, 198, 255, 0.18), transparent 28%),
+          radial-gradient(circle at top right, rgba(230, 89, 173, 0.18), transparent 24%),
+          linear-gradient(180deg, #041022 0%, #091933 100%);
       }
-      body { padding: 28px; }
-      .card {
-        max-width: 560px;
+      body {
+        padding: 30px;
+      }
+      .app {
+        max-width: 620px;
         margin: 0 auto;
-        padding: 24px;
-        border-radius: 22px;
-        background: rgba(17, 24, 39, 0.92);
-        box-shadow: 0 24px 70px rgba(15, 23, 42, 0.45);
+        padding: 28px;
+        border-radius: 28px;
+        border: 1px solid var(--panel-border);
+        background: linear-gradient(180deg, rgba(8, 23, 50, 0.94), rgba(5, 16, 35, 0.98));
+        box-shadow: 0 28px 80px rgba(2, 10, 25, 0.42);
+        position: relative;
+        overflow: hidden;
       }
-      h1 { margin: 0 0 6px; font-size: 28px; }
-      p { color: var(--muted); margin-top: 0; }
-      .status {
-        margin: 18px 0 24px;
-        padding: 16px;
-        border-radius: 18px;
-        background: var(--accent-soft);
+      .app::before {
+        content: "";
+        position: absolute;
+        inset: 1px;
+        border-radius: 27px;
+        border: 1px solid var(--panel-outline);
+        pointer-events: none;
       }
-      label {
-        display: block;
-        margin: 14px 0 6px;
+      .hero {
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+        gap: 18px;
+      }
+      .brand {
+        display: flex;
+        align-items: center;
+        gap: 14px;
+      }
+      .brand-mark {
+        width: 44px;
+        height: 44px;
+        border-radius: 14px;
+        box-shadow: 0 12px 24px rgba(109, 74, 255, 0.24);
+      }
+      .eyebrow {
+        margin: 0 0 6px;
+        font-size: 11px;
+        letter-spacing: 0.16em;
+        text-transform: uppercase;
         color: var(--muted);
+      }
+      h1 {
+        margin: 0;
+        font-size: 32px;
+        font-family: var(--font-display);
+        font-weight: 450;
+        letter-spacing: -0.02em;
+      }
+      .lede {
+        margin: 10px 0 0;
+        max-width: 420px;
+        color: #cad8f0;
+        line-height: 1.55;
+      }
+      .hero-badge {
+        padding: 10px 14px;
+        border-radius: 16px;
+        background: linear-gradient(135deg, var(--cyan-soft), rgba(139, 92, 246, 0.18));
+        border: 1px solid rgba(143, 189, 255, 0.14);
+        color: #d8e6ff;
+        font-size: 12px;
+        text-align: right;
+      }
+      .status-grid {
+        margin-top: 24px;
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 12px;
+      }
+      .status-card {
+        padding: 16px;
+        border-radius: 20px;
+        background: linear-gradient(180deg, rgba(15, 35, 72, 0.7), rgba(7, 19, 42, 0.9));
+        border: 1px solid rgba(143, 189, 255, 0.12);
+      }
+      .status-card span {
+        display: block;
+      }
+      .status-label {
+        margin-bottom: 8px;
+        color: var(--muted);
+        font-size: 12px;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+      }
+      .status-value {
+        color: var(--text);
+        font-size: 15px;
+        line-height: 1.45;
+      }
+      .section {
+        margin-top: 26px;
+        padding: 20px;
+        border-radius: 22px;
+        background: linear-gradient(180deg, rgba(9, 24, 54, 0.8), rgba(7, 19, 42, 0.92));
+        border: 1px solid rgba(143, 189, 255, 0.12);
+      }
+      .section-title {
+        margin: 0 0 6px;
+        font-size: 18px;
+        font-family: var(--font-display);
+        font-weight: 450;
+      }
+      .section-copy {
+        margin: 0 0 18px;
+        color: var(--muted);
+        line-height: 1.5;
+      }
+      .field-grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 14px;
+      }
+      label.field-label {
+        display: block;
+        margin: 0 0 8px;
+        color: #d7e3f8;
         font-size: 13px;
+      }
+      .field-hint {
+        display: block;
+        margin-top: 6px;
+        color: var(--muted);
+        font-size: 12px;
       }
       input[type="number"] {
         width: 100%;
-        box-sizing: border-box;
-        padding: 12px 14px;
-        border-radius: 14px;
-        border: 1px solid rgba(255,255,255,0.08);
-        background: rgba(15, 23, 42, 0.75);
+        padding: 13px 14px;
+        border-radius: 16px;
+        border: 1px solid var(--field-border);
+        background: rgba(6, 18, 38, 0.88);
         color: var(--text);
+        font-family: var(--font);
+        font-size: 15px;
+      }
+      .toggle-list {
+        margin-top: 18px;
+        display: grid;
+        gap: 12px;
       }
       .toggle-row {
-        margin-top: 12px;
         display: flex;
-        align-items: center;
+        align-items: flex-start;
         gap: 12px;
+        padding: 14px 16px;
+        border-radius: 18px;
+        background: rgba(255, 255, 255, 0.04);
+        border: 1px solid rgba(143, 189, 255, 0.08);
+      }
+      .toggle-row input {
+        margin: 3px 0 0;
+        inline-size: 16px;
+        block-size: 16px;
+        accent-color: var(--accent-strong);
+      }
+      .toggle-copy {
+        display: block;
+        color: var(--muted);
+        font-size: 12px;
+        line-height: 1.5;
       }
       .actions {
         margin-top: 24px;
         display: flex;
+        flex-wrap: wrap;
         gap: 10px;
       }
       button {
+        appearance: none;
         border: 0;
-        border-radius: 14px;
-        padding: 12px 16px;
-        background: rgba(255,255,255,0.08);
+        border-radius: 16px;
+        padding: 13px 18px;
+        background: rgba(255, 255, 255, 0.08);
         color: var(--text);
+        font-family: var(--font);
+        font-size: 14px;
+        font-weight: 500;
         cursor: pointer;
       }
-      .primary { background: var(--accent); }
+      button:hover {
+        background: rgba(255, 255, 255, 0.12);
+      }
+      .primary {
+        background: linear-gradient(135deg, var(--accent) 0%, var(--accent-strong) 100%);
+        box-shadow: 0 14px 28px rgba(109, 74, 255, 0.24);
+      }
+      @media (max-width: 640px) {
+        body {
+          padding: 18px;
+        }
+        .app {
+          padding: 22px;
+        }
+        .hero,
+        .status-grid,
+        .field-grid {
+          grid-template-columns: 1fr;
+          display: grid;
+        }
+        .hero {
+          gap: 16px;
+        }
+        .hero-badge {
+          text-align: left;
+        }
+      }
     </style>
   </head>
   <body>
-    <div class="card">
-      <h1>protoncode</h1>
-      <p>background watcher for masked otp overlays.</p>
-      <div class="status">
-        <div><strong>Session:</strong> <span id="session-state">Restoring session</span></div>
-        <div><strong>Autostart:</strong> <span id="autostart-status">Disabled</span></div>
-        <div><strong>Last code:</strong> <span id="last-code">None yet</span></div>
+    <div class="app">
+      <div class="hero">
+        <div>
+          <div class="brand">
+            <img class="brand-mark" src="" alt="ProtonCode icon" id="brand-mark" />
+            <div>
+              <p class="eyebrow">Desktop Control Center</p>
+              <h1>ProtonCode</h1>
+            </div>
+          </div>
+          <p class="lede">Monitor Proton Mail for one-time passcodes with a calmer, polished desktop experience. Notifications stay masked until you choose to reveal or copy them.</p>
+        </div>
+        <div class="hero-badge">Secure desktop notifications<br />for Proton Mail sign-in codes</div>
       </div>
 
-      <label for="poll-interval">Polling interval in seconds</label>
-      <input id="poll-interval" type="number" min="5" max="30" />
-
-      <label for="notification-duration">Notification duration in seconds</label>
-      <input id="notification-duration" type="number" min="5" max="15" />
-
-      <div class="toggle-row">
-        <input id="copy-button-enabled" type="checkbox" />
-        <label for="copy-button-enabled" style="margin: 0; color: var(--text);">Enable copy button on overlays</label>
+      <div class="status-grid">
+        <div class="status-card">
+          <span class="status-label">Session</span>
+          <span class="status-value" id="session-state">Restoring session</span>
+        </div>
+        <div class="status-card">
+          <span class="status-label">Launch at Sign-In</span>
+          <span class="status-value" id="autostart-status">Disabled</span>
+        </div>
+        <div class="status-card">
+          <span class="status-label">Last Masked Code</span>
+          <span class="status-value" id="last-code">No code received yet</span>
+        </div>
       </div>
 
-      <div class="toggle-row">
-        <input id="launch-on-startup" type="checkbox" />
-        <label for="launch-on-startup" style="margin: 0; color: var(--text);">Launch on Windows sign-in</label>
-      </div>
+      <div class="section">
+        <h2 class="section-title">Monitoring Preferences</h2>
+        <p class="section-copy">Adjust how frequently ProtonCode checks for updates and how long notification cards remain visible.</p>
 
-      <div class="actions">
-        <button class="primary" id="save">Save settings</button>
-        <button id="login">Open Proton login</button>
-        <button id="close">Hide</button>
+        <div class="field-grid">
+          <div>
+            <label class="field-label" for="poll-interval">Monitoring Interval</label>
+            <input id="poll-interval" type="number" min="5" max="30" />
+            <span class="field-hint">Accepted range: 5 to 30 seconds.</span>
+          </div>
+          <div>
+            <label class="field-label" for="notification-duration">Notification Duration</label>
+            <input id="notification-duration" type="number" min="5" max="15" />
+            <span class="field-hint">Accepted range: 5 to 15 seconds.</span>
+          </div>
+        </div>
+
+        <div class="toggle-list">
+          <label class="toggle-row" for="copy-button-enabled">
+            <input id="copy-button-enabled" type="checkbox" />
+            <span>
+              <strong>Allow Copy from Notifications</strong>
+              <span class="toggle-copy">Show the copy action on notification cards when you want a faster clipboard workflow.</span>
+            </span>
+          </label>
+
+          <label class="toggle-row" for="launch-on-startup">
+            <input id="launch-on-startup" type="checkbox" />
+            <span>
+              <strong>Launch with Windows</strong>
+              <span class="toggle-copy">Start ProtonCode automatically after Windows sign-in and keep it ready in the tray.</span>
+            </span>
+          </label>
+        </div>
+
+        <div class="actions">
+          <button class="primary" id="save">Save Changes</button>
+          <button id="login">Open Proton Mail</button>
+          <button id="close">Hide Window</button>
+        </div>
       </div>
     </div>
     <script>
+      document.getElementById("brand-mark").src = "__APP_ICON__";
+
       const elements = {
         sessionState: document.getElementById("session-state"),
         autostartStatus: document.getElementById("autostart-status"),
@@ -989,7 +1316,7 @@ fn settings_html() -> String {
         render(payload) {
           elements.sessionState.textContent = payload.session_state;
           elements.autostartStatus.textContent = payload.autostart_status;
-          elements.lastCode.textContent = payload.last_masked_code || "None yet";
+          elements.lastCode.textContent = payload.last_masked_code || "No code received yet";
           elements.pollInterval.value = payload.poll_interval_seconds;
           elements.notificationDuration.value = payload.notification_duration_seconds;
           elements.copyEnabled.checked = payload.copy_button_enabled;
@@ -999,8 +1326,64 @@ fn settings_html() -> String {
     </script>
   </body>
 </html>
-"#
-    .to_owned()
+"#,
+    );
+
+    html.replace("__APP_ICON__", &embedded_app_icon_data_url())
+}
+
+fn embedded_font_face_css() -> String {
+    format!(
+        r#"
+      @font-face {{
+        font-family: "Arizona Sans Local";
+        src: url("{}") format("truetype");
+        font-style: normal;
+        font-weight: 100 700;
+        font-display: swap;
+      }}
+      @font-face {{
+        font-family: "Arizona Flare Local";
+        src: url("{}") format("truetype");
+        font-style: normal;
+        font-weight: 100 700;
+        font-display: swap;
+      }}
+      @font-face {{
+        font-family: "Ubuntu Local";
+        src: url("{}") format("truetype");
+        font-style: normal;
+        font-weight: 400;
+      }}
+      @font-face {{
+        font-family: "Ubuntu Local";
+        src: url("{}") format("truetype");
+        font-style: normal;
+        font-weight: 500 700;
+      }}
+"#,
+        embedded_data_url(
+            "font/ttf",
+            include_bytes!("../assets/ABCArizonaSansVariable-Trial.ttf")
+        ),
+        embedded_data_url(
+            "font/ttf",
+            include_bytes!("../assets/ABCArizonaFlareVariable-Trial.ttf")
+        ),
+        embedded_data_url("font/ttf", include_bytes!("../assets/ubuntu-r.ttf")),
+        embedded_data_url("font/ttf", include_bytes!("../assets/ubuntu-m.ttf"))
+    )
+}
+
+fn embedded_app_icon_data_url() -> String {
+    embedded_data_url("image/png", include_bytes!("../assets/protoncode-icon.png"))
+}
+
+fn embedded_data_url(mime: &str, bytes: &[u8]) -> String {
+    format!(
+        "data:{mime};base64,{}",
+        base64::engine::general_purpose::STANDARD.encode(bytes)
+    )
 }
 
 fn app_icon() -> Result<tray_icon::Icon> {
@@ -1010,4 +1393,12 @@ fn app_icon() -> Result<tray_icon::Icon> {
     let (width, height) = icon.dimensions();
     tray_icon::Icon::from_rgba(icon.into_raw(), width, height)
         .context("failed to build icon from embedded png")
+}
+
+fn native_window_icon() -> Result<TaoIcon> {
+    let icon = image::load_from_memory(include_bytes!("../assets/protoncode-icon.png"))
+        .expect("embedded app icon must be a valid png")
+        .into_rgba8();
+    let (width, height) = icon.dimensions();
+    TaoIcon::from_rgba(icon.into_raw(), width, height).context("failed to build native window icon")
 }
