@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.4](https://github.com/Microck/protoncode/compare/v0.1.3...v0.1.4) (2026-03-13)
+
+
+### Bug Fixes
+
+* **ui:** flatten desktop chrome ([b9494d1](https://github.com/Microck/protoncode/commit/b9494d195467b58a8d4266df9bea23727f2d709c))
+
 ## [0.1.3](https://github.com/Microck/protoncode/compare/v0.1.2...v0.1.3) (2026-03-13)
 
 
