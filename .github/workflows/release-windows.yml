@@ -1,0 +1,39 @@
+name: release-windows
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: build release binary
+        run: cargo build --locked --release --target x86_64-pc-windows-msvc
+
+      - name: stage release files
+        shell: pwsh
+        run: |
+          $version = "${{ github.event.release.tag_name }}"
+          $root = "dist/protoncode-$version-windows-x86_64"
+          New-Item -ItemType Directory -Force -Path $root | Out-Null
+          Copy-Item "target/x86_64-pc-windows-msvc/release/protoncode.exe" "$root/protoncode.exe"
+          Copy-Item "README.md" "$root/README.md"
+          Copy-Item "assets/protoncode-icon.png" "$root/protoncode-icon.png"
+          Compress-Archive -Path "$root/*" -DestinationPath "$root.zip" -Force
+
+      - name: upload release zip
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/protoncode-*.zip

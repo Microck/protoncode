@@ -1,0 +1,9 @@
+/target
+/dist
+.idea/
+.vscode/
+*.rs.bk
+*.pdb
+*.exe
+thumbs.db
+.DS_Store
