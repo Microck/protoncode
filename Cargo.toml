@@ -2,7 +2,12 @@
 name = "protoncode"
 version = "0.1.5"
 edition = "2024"
-description = "windows tray app for masked proton mail otp notifications"
+authors = ["Microck <contact@micr.dev>"]
+description = "desktop tray app for masked proton mail otp notifications"
+license = "MIT"
+readme = "README.md"
+homepage = "https://github.com/Microck/protoncode"
+repository = "https://github.com/Microck/protoncode"
 
 [dependencies]
 anyhow = "1.0.100"
@@ -21,11 +26,39 @@ tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.20", features = ["env-filter", "fmt"] }
 url = "2.5.7"
 
-[target.'cfg(windows)'.dependencies]
+[target.'cfg(any(windows, target_os = "linux"))'.dependencies]
 tao = "0.34.6"
 tray-icon = "0.21.3"
-winreg = "0.55.0"
 wry = "0.54.2"
+
+[target.'cfg(windows)'.dependencies]
+winreg = "0.55.0"
 
 [build-dependencies]
 winresource = "0.1.20"
+
+[package.metadata.deb]
+maintainer = "Microck <contact@micr.dev>"
+copyright = "2026, Microck <contact@micr.dev>"
+license-file = ["LICENSE", "4"]
+depends = "$auto"
+section = "utility"
+priority = "optional"
+assets = [
+    ["target/release/protoncode", "usr/bin/protoncode", "755"],
+    ["packaging/linux/protoncode.desktop", "usr/share/applications/protoncode.desktop", "644"],
+    ["assets/protoncode-icon.png", "usr/share/pixmaps/protoncode.png", "644"],
+    ["README.md", "usr/share/doc/protoncode/README.md", "644"],
+    ["LICENSE", "usr/share/doc/protoncode/LICENSE", "644"],
+]
+
+[package.metadata.generate-rpm]
+summary = "Desktop tray app for masked Proton Mail OTP notifications"
+assets = [
+    { source = "target/release/protoncode", dest = "/usr/bin/protoncode", mode = "755" },
+    { source = "packaging/linux/protoncode.desktop", dest = "/usr/share/applications/protoncode.desktop", mode = "644" },
+    { source = "assets/protoncode-icon.png", dest = "/usr/share/pixmaps/protoncode.png", mode = "644" },
+    { source = "README.md", dest = "/usr/share/doc/protoncode/README.md", mode = "644" },
+    { source = "LICENSE", dest = "/usr/share/licenses/protoncode/LICENSE", mode = "644" },
+]
+auto-req = "find-requires"

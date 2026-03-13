@@ -5,5 +5,5 @@ pub mod models;
 pub mod otp;
 pub mod secrets;
 
-#[cfg(windows)]
-pub mod windows_app;
+#[cfg(any(windows, target_os = "linux"))]
+pub mod desktop_app;

@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=ProtonCode
+Comment=Tray app for masked Proton Mail OTP notifications
+Exec=protoncode
+Icon=protoncode
+Terminal=false
+Categories=Utility;Network;
+Keywords=proton;otp;2fa;tray;mail;
+StartupNotify=true

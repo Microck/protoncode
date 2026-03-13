@@ -1,5 +1,3 @@
-#![cfg(windows)]
-
 use std::borrow::Cow;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
@@ -12,15 +10,21 @@ use serde::{Deserialize, Serialize};
 use tao::dpi::{LogicalPosition, LogicalSize};
 use tao::event::{Event, StartCause, WindowEvent};
 use tao::event_loop::{ControlFlow, EventLoop, EventLoopBuilder, EventLoopProxy};
-use tao::platform::windows::WindowBuilderExtWindows;
 use tao::window::{Icon as TaoIcon, Window, WindowBuilder};
 use time::OffsetDateTime;
 use tracing::{error, info, warn};
 use tray_icon::TrayIconBuilder;
-use tray_icon::menu::{Menu, MenuEvent, MenuItem};
+use tray_icon::menu::{Menu, MenuEvent, MenuId, MenuItem};
 use wry::http::header::CONTENT_TYPE;
 use wry::http::{Request, Response, StatusCode};
 use wry::{WebContext, WebView, WebViewBuilder};
+
+#[cfg(target_os = "linux")]
+use tao::platform::unix::{EventLoopBuilderExtUnix, WindowBuilderExtUnix, WindowExtUnix};
+#[cfg(windows)]
+use tao::platform::windows::WindowBuilderExtWindows;
+#[cfg(target_os = "linux")]
+use wry::WebViewBuilderExtUnix;
 
 use crate::app::AppState;
 use crate::autostart;
@@ -44,8 +48,12 @@ pub fn run() -> Result<()> {
     let secrets = SecretStore::new();
     let launched_from_autostart = autostart::has_autostart_flag(std::env::args_os());
 
-    let event_loop = EventLoopBuilder::<UserEvent>::with_user_event().build();
+    let mut event_loop_builder = EventLoopBuilder::<UserEvent>::with_user_event();
+    #[cfg(target_os = "linux")]
+    event_loop_builder.with_app_id("dev.micr.protoncode");
+    let event_loop = event_loop_builder.build();
     let proxy = event_loop.create_proxy();
+    install_menu_event_handler(proxy.clone());
 
     let windows = Windows::build(&event_loop, proxy.clone(), state.clone())?;
     let tray = AppTray::build()?;
@@ -74,13 +82,22 @@ pub fn run() -> Result<()> {
     event_loop.run(move |event, elwt, control_flow| {
         *control_flow = ControlFlow::Wait;
 
-        drain_tray_events(&tray, &windows, &state, &secrets, &proxy, control_flow);
-
         match event {
             Event::NewEvents(StartCause::Init) => {
                 if let Ok(state) = lock_state(&state) {
                     let _ = refresh_settings(&windows.settings, &state);
                 }
+            }
+            Event::UserEvent(UserEvent::TrayMenu(menu_id)) => {
+                handle_tray_event(
+                    &menu_id,
+                    &tray,
+                    &windows,
+                    &state,
+                    &secrets,
+                    &proxy,
+                    control_flow,
+                );
             }
             Event::UserEvent(user_event) => {
                 if let Err(error) = handle_user_event(user_event, &windows, &state, &secrets) {
@@ -200,6 +217,7 @@ fn handle_user_event(
         UserEvent::SetSession(session_state) => {
             update_session(state.clone(), &windows.settings, session_state)?;
         }
+        UserEvent::TrayMenu(_) => {}
     }
 
     Ok(())
@@ -262,7 +280,8 @@ fn update_session(
     Ok(())
 }
 
-fn drain_tray_events(
+fn handle_tray_event(
+    menu_id: &MenuId,
     tray: &AppTray,
     windows: &Windows,
     state: &Arc<Mutex<AppState>>,
@@ -270,36 +289,33 @@ fn drain_tray_events(
     proxy: &EventLoopProxy<UserEvent>,
     control_flow: &mut ControlFlow,
 ) {
-    while let Ok(event) = MenuEvent::receiver().try_recv() {
-        let id = event.id;
-        if id == tray.open_status.id() {
-            windows.settings_window.set_visible(true);
-            windows.settings_window.set_focus();
-            if let Ok(state) = lock_state(state) {
-                let _ = refresh_settings(&windows.settings, &state);
-            }
-        } else if id == tray.open_login.id() {
-            windows.proton_window.set_visible(true);
-            windows.proton_window.set_focus();
-        } else if id == tray.pause_resume.id() {
-            if let Ok(mut state) = lock_state(state) {
-                let next = if state.session_state == MailSessionState::Paused {
-                    MailSessionState::Authenticated
-                } else {
-                    MailSessionState::Paused
-                };
-                state.set_session_state(next);
-                let _ = refresh_settings(&windows.settings, &state);
-            }
-        } else if id == tray.clear_session.id() {
-            if let Err(error) = secrets.clear_session_marker() {
-                warn!(?error, "failed to clear session marker");
-            }
-            let _ = proxy.send_event(UserEvent::SetSession(MailSessionState::Unauthenticated));
-            windows.proton_window.set_visible(true);
-        } else if id == tray.quit.id() {
-            *control_flow = ControlFlow::Exit;
+    if menu_id == tray.open_status.id() {
+        windows.settings_window.set_visible(true);
+        windows.settings_window.set_focus();
+        if let Ok(state) = lock_state(state) {
+            let _ = refresh_settings(&windows.settings, &state);
         }
+    } else if menu_id == tray.open_login.id() {
+        windows.proton_window.set_visible(true);
+        windows.proton_window.set_focus();
+    } else if menu_id == tray.pause_resume.id() {
+        if let Ok(mut state) = lock_state(state) {
+            let next = if state.session_state == MailSessionState::Paused {
+                MailSessionState::Authenticated
+            } else {
+                MailSessionState::Paused
+            };
+            state.set_session_state(next);
+            let _ = refresh_settings(&windows.settings, &state);
+        }
+    } else if menu_id == tray.clear_session.id() {
+        if let Err(error) = secrets.clear_session_marker() {
+            warn!(?error, "failed to clear session marker");
+        }
+        let _ = proxy.send_event(UserEvent::SetSession(MailSessionState::Unauthenticated));
+        windows.proton_window.set_visible(true);
+    } else if menu_id == tray.quit.id() {
+        *control_flow = ControlFlow::Exit;
     }
 }
 
@@ -380,6 +396,30 @@ fn lock_state(state: &Arc<Mutex<AppState>>) -> Result<std::sync::MutexGuard<'_, 
     state.lock().map_err(|_| anyhow!("app state poisoned"))
 }
 
+fn install_menu_event_handler(proxy: EventLoopProxy<UserEvent>) {
+    MenuEvent::set_event_handler(Some(move |event: MenuEvent| {
+        let _ = proxy.send_event(UserEvent::TrayMenu(event.id().clone()));
+    }));
+}
+
+fn build_platform_webview<'a>(
+    builder: WebViewBuilder<'a>,
+    window: &'a Window,
+) -> wry::Result<WebView> {
+    #[cfg(target_os = "linux")]
+    {
+        let vbox = window
+            .default_vbox()
+            .expect("tao linux windows should provide a default GTK box");
+        builder.build_gtk(vbox)
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        builder.build(window)
+    }
+}
+
 trait StateView {
     fn config(&self) -> &AppConfig;
     fn session_state(&self) -> MailSessionState;
@@ -449,8 +489,9 @@ impl Windows {
             .context("failed to build overlay window")?;
 
         let overlay_proxy = proxy.clone();
-        let overlay =
+        let overlay = build_platform_webview(
             WebViewBuilder::new()
+                .with_transparent(true)
                 .with_custom_protocol(APP_PROTOCOL.into(), |_webview_id, request| {
                     app_protocol_response(request)
                 })
@@ -461,9 +502,10 @@ impl Windows {
                             action: "dismiss".to_owned(),
                         });
                     let _ = overlay_proxy.send_event(UserEvent::OverlayAction(parsed));
-                })
-                .build(&overlay_window)
-                .context("failed to build overlay webview")?;
+                }),
+            &overlay_window,
+        )
+        .context("failed to build overlay webview")?;
 
         let settings_window = WindowBuilder::new()
             .with_title(SETTINGS_HTML_TITLE)
@@ -474,18 +516,20 @@ impl Windows {
             .context("failed to build settings window")?;
 
         let settings_proxy = proxy.clone();
-        let settings = WebViewBuilder::new()
-            .with_custom_protocol(APP_PROTOCOL.into(), |_webview_id, request| {
-                app_protocol_response(request)
-            })
-            .with_url(SETTINGS_PAGE_URL)
-            .with_ipc_handler(move |payload: Request<String>| {
-                if let Ok(parsed) = serde_json::from_str::<SettingsAction>(payload.body()) {
-                    let _ = settings_proxy.send_event(UserEvent::SettingsAction(parsed));
-                }
-            })
-            .build(&settings_window)
-            .context("failed to build settings webview")?;
+        let settings = build_platform_webview(
+            WebViewBuilder::new()
+                .with_custom_protocol(APP_PROTOCOL.into(), |_webview_id, request| {
+                    app_protocol_response(request)
+                })
+                .with_url(SETTINGS_PAGE_URL)
+                .with_ipc_handler(move |payload: Request<String>| {
+                    if let Ok(parsed) = serde_json::from_str::<SettingsAction>(payload.body()) {
+                        let _ = settings_proxy.send_event(UserEvent::SettingsAction(parsed));
+                    }
+                }),
+            &settings_window,
+        )
+        .context("failed to build settings webview")?;
 
         let proton_window = WindowBuilder::new()
             .with_title(PROTON_LOGIN_TITLE)
@@ -498,26 +542,28 @@ impl Windows {
         let proton_proxy = proxy;
         let monitor_script = proton_monitor_script(config.poll_interval_seconds);
         let mut web_context = WebContext::new(Some(config.user_data_dir.clone()));
-        let proton = WebViewBuilder::new_with_web_context(&mut web_context)
-            .with_url(&config.proton_mail_url)
-            .with_initialization_script(&monitor_script)
-            .with_ipc_handler(move |payload: Request<String>| {
-                match serde_json::from_str::<ProtonIpc>(payload.body()) {
-                    Ok(ProtonIpc::Snapshot(snapshot)) => {
-                        let _ = proton_proxy.send_event(UserEvent::ProtonSnapshot(snapshot));
+        let proton = build_platform_webview(
+            WebViewBuilder::new_with_web_context(&mut web_context)
+                .with_url(&config.proton_mail_url)
+                .with_initialization_script(&monitor_script)
+                .with_ipc_handler(move |payload: Request<String>| {
+                    match serde_json::from_str::<ProtonIpc>(payload.body()) {
+                        Ok(ProtonIpc::Snapshot(snapshot)) => {
+                            let _ = proton_proxy.send_event(UserEvent::ProtonSnapshot(snapshot));
+                        }
+                        Ok(ProtonIpc::DismissOverlay) => {
+                            let _ = proton_proxy.send_event(UserEvent::DismissOverlay);
+                        }
+                        Err(error) => {
+                            let _ = proton_proxy
+                                .send_event(UserEvent::SetSession(MailSessionState::Error));
+                            warn!(?error, "failed to parse Proton ipc payload");
+                        }
                     }
-                    Ok(ProtonIpc::DismissOverlay) => {
-                        let _ = proton_proxy.send_event(UserEvent::DismissOverlay);
-                    }
-                    Err(error) => {
-                        let _ =
-                            proton_proxy.send_event(UserEvent::SetSession(MailSessionState::Error));
-                        warn!(?error, "failed to parse Proton ipc payload");
-                    }
-                }
-            })
-            .build(&proton_window)
-            .context("failed to build Proton webview")?;
+                }),
+            &proton_window,
+        )
+        .context("failed to build Proton webview")?;
 
         Ok(Self {
             overlay_window,
@@ -583,6 +629,7 @@ enum UserEvent {
     ProtonSnapshot(ProtonSnapshot),
     OverlayAction(OverlayAction),
     SettingsAction(SettingsAction),
+    TrayMenu(MenuId),
     DismissOverlay,
     SetSession(MailSessionState),
 }

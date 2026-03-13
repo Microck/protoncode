@@ -9,15 +9,15 @@ fn main() -> Result<()> {
         .compact()
         .init();
 
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "linux"))]
     {
-        protoncode::windows_app::run()
+        protoncode::desktop_app::run()
     }
 
-    #[cfg(not(windows))]
+    #[cfg(not(any(windows, target_os = "linux")))]
     {
         eprintln!(
-            "protoncode currently runs only on windows 10/11. core parsing and config tests still work on this platform."
+            "protoncode currently runs only on windows and linux. core parsing and config tests still work on this platform."
         );
         Ok(())
     }

@@ -1,0 +1,61 @@
+name: release-linux
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+jobs:
+  build-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: install linux packaging dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libgtk-3-dev \
+            libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            libxdo-dev \
+            rpm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: install packaging tools
+        run: cargo install cargo-deb cargo-generate-rpm --locked
+
+      - name: build release binary
+        run: cargo build --locked --release
+
+      - name: stage linux release files
+        run: |
+          version="${{ github.event.release.tag_name }}"
+          archive_root="dist/protoncode-${version}-linux-x86_64"
+          mkdir -p "$archive_root"
+          cp target/release/protoncode "$archive_root/"
+          cp packaging/linux/protoncode.desktop "$archive_root/"
+          cp assets/protoncode-icon.png "$archive_root/"
+          cp README.md LICENSE "$archive_root/"
+          tar -C dist -czf "dist/protoncode-${version}-linux-x86_64.tar.gz" "protoncode-${version}-linux-x86_64"
+
+      - name: build deb package
+        run: cargo deb --no-build --output "dist/protoncode-${{ github.event.release.tag_name }}-linux-x86_64.deb"
+
+      - name: build rpm package
+        run: |
+          cargo generate-rpm
+          cp target/generate-rpm/*.rpm "dist/protoncode-${{ github.event.release.tag_name }}-linux-x86_64.rpm"
+
+      - name: upload linux release artifacts
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/protoncode-*-linux-x86_64.tar.gz
+            dist/protoncode-*-linux-x86_64.deb
+            dist/protoncode-*-linux-x86_64.rpm
