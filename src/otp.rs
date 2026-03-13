@@ -17,8 +17,13 @@ const OTP_CONTEXT_TERMS: &[&str] = &[
 ];
 
 pub fn detect_otp(email: &OtpCandidateEmail) -> Option<OtpMatch> {
-    let normalized = normalize_text(&email.body_text);
-    let regex = Regex::new(r"\b([0-9]{4,8})\b").expect("valid OTP regex");
+    let normalized_subject = email
+        .subject
+        .as_deref()
+        .map(normalize_text)
+        .unwrap_or_default();
+    let normalized_body = normalize_text(&email.body_text);
+    let subject_has_context = has_context_term(&normalized_subject);
 
     let source_label = email
         .sender
@@ -26,21 +31,11 @@ pub fn detect_otp(email: &OtpCandidateEmail) -> Option<OtpMatch> {
         .or_else(|| email.subject.clone())
         .unwrap_or_else(|| "Proton Mail".to_owned());
 
-    for captures in regex.captures_iter(&normalized) {
-        let code = captures.get(1)?.as_str();
-        let start = captures.get(0)?.start().saturating_sub(48);
-        let end = (captures.get(0)?.end() + 48).min(normalized.len());
-        let context = &normalized[start..end];
-
-        if OTP_CONTEXT_TERMS.iter().any(|term| context.contains(term)) {
-            return Some(OtpMatch {
-                code: code.to_owned(),
-                source_label,
-            });
-        }
+    if let Some(code) = find_otp_code(&normalized_body, subject_has_context) {
+        return Some(OtpMatch { code, source_label });
     }
 
-    None
+    find_otp_code(&normalized_subject, false).map(|code| OtpMatch { code, source_label })
 }
 
 fn normalize_text(input: &str) -> String {
@@ -49,6 +44,63 @@ fn normalize_text(input: &str) -> String {
         .replace("\r\n", "\n")
         .replace('\r', "\n")
         .to_lowercase()
+}
+
+fn find_otp_code(text: &str, allow_subject_context_fallback: bool) -> Option<String> {
+    let regex = Regex::new(r"\b((?:[0-9][\s-]?){3,7}[0-9])\b").expect("valid OTP regex");
+    let mut candidates = Vec::new();
+
+    for captures in regex.captures_iter(text) {
+        let raw_candidate = captures.get(1)?.as_str();
+        if looks_like_date(raw_candidate) {
+            continue;
+        }
+
+        let code: String = raw_candidate
+            .chars()
+            .filter(|ch| ch.is_ascii_digit())
+            .collect();
+        if !(4..=8).contains(&code.len()) {
+            continue;
+        }
+
+        let start = captures.get(0)?.start().saturating_sub(72);
+        let end = (captures.get(0)?.end() + 72).min(text.len());
+        let context = &text[start..end];
+
+        if has_context_term(context) {
+            return Some(code);
+        }
+
+        candidates.push(code);
+    }
+
+    if allow_subject_context_fallback && candidates.len() == 1 && is_sparse_code_surface(text) {
+        return candidates.into_iter().next();
+    }
+
+    None
+}
+
+fn has_context_term(text: &str) -> bool {
+    OTP_CONTEXT_TERMS.iter().any(|term| text.contains(term))
+}
+
+fn looks_like_date(candidate: &str) -> bool {
+    let trimmed = candidate.trim();
+    let date_like = Regex::new(r"^\d{4}-\d{2}-\d{2}$").expect("valid date regex");
+    date_like.is_match(trimmed)
+}
+
+fn is_sparse_code_surface(text: &str) -> bool {
+    text.chars().all(|ch| {
+        ch.is_ascii_digit()
+            || ch.is_whitespace()
+            || matches!(
+                ch,
+                '-' | ':' | '.' | ',' | '(' | ')' | '[' | ']' | '|' | '/'
+            )
+    })
 }
 
 #[cfg(test)]
@@ -92,5 +144,35 @@ mod tests {
             result.as_ref().map(|value| value.code.as_str()),
             Some("4812")
         );
+    }
+
+    #[test]
+    fn supports_grouped_digits() {
+        let result = detect_otp(&email("Your verification code is 123 456."));
+        assert_eq!(
+            result.as_ref().map(|value| value.code.as_str()),
+            Some("123456")
+        );
+    }
+
+    #[test]
+    fn uses_subject_context_when_body_contains_only_code() {
+        let mut candidate = email("123456");
+        candidate.subject = Some("Security code".to_owned());
+
+        let result = detect_otp(&candidate);
+        assert_eq!(
+            result.as_ref().map(|value| value.code.as_str()),
+            Some("123456")
+        );
+    }
+
+    #[test]
+    fn ignores_date_like_values_even_with_subject_context() {
+        let mut candidate = email("2026-03-13");
+        candidate.subject = Some("Verification code".to_owned());
+
+        let result = detect_otp(&candidate);
+        assert!(result.is_none());
     }
 }

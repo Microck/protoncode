@@ -161,6 +161,28 @@ fn handle_user_event(
                 state.save_config()?;
                 refresh_settings(&windows.settings, &state)?;
             }
+            "test_notification" => {
+                let (notification, copy_enabled) = {
+                    let mut state = lock_state(state)?;
+                    let notification = OtpNotification::new(
+                        "Test Notification".to_owned(),
+                        "258630".to_owned(),
+                        OffsetDateTime::now_utc(),
+                        state.config.notification_duration_seconds,
+                    );
+                    let copy_enabled = state.config.copy_button_enabled;
+                    state.current_notification = Some(notification.clone());
+                    refresh_settings(&windows.settings, &state)?;
+                    (notification, copy_enabled)
+                };
+
+                show_overlay(
+                    &windows.overlay_window,
+                    &windows.overlay,
+                    &notification,
+                    copy_enabled,
+                )?;
+            }
             "login_window" => {
                 windows.proton_window.set_visible(true);
                 windows.proton_window.set_focus();
@@ -323,6 +345,7 @@ fn show_overlay(
 fn position_overlay(window: &Window) -> Result<()> {
     let monitor = window
         .current_monitor()
+        .or_else(|| window.available_monitors().next())
         .context("missing current monitor for overlay")?;
     let scale_factor = monitor.scale_factor();
     let size = monitor.size().to_logical::<f64>(scale_factor);
@@ -1277,6 +1300,7 @@ fn settings_html() -> String {
 
         <div class="actions">
           <button class="primary" id="save">Save Changes</button>
+          <button id="test-notification">Test Notification</button>
           <button id="login">Open Proton Mail</button>
           <button id="close">Hide Window</button>
         </div>
@@ -1307,6 +1331,10 @@ fn settings_html() -> String {
 
       document.getElementById("login").addEventListener("click", () => {
         window.ipc.postMessage(JSON.stringify({ kind: "login_window" }));
+      });
+
+      document.getElementById("test-notification").addEventListener("click", () => {
+        window.ipc.postMessage(JSON.stringify({ kind: "test_notification" }));
       });
 
       document.getElementById("close").addEventListener("click", () => {
