@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.5](https://github.com/Microck/protoncode/compare/v0.1.4...v0.1.5) (2026-03-13)
+
+
+### Bug Fixes
+
+* **otp:** improve detection and add notification test ([987c7b3](https://github.com/Microck/protoncode/commit/987c7b35b3892e44f9472b584ebe700dc91ec19e))
+
 ## [0.1.4](https://github.com/Microck/protoncode/compare/v0.1.3...v0.1.4) (2026-03-13)
 
 

@@ -1,6 +1,6 @@
 [package]
 name = "protoncode"
-version = "0.1.4"
+version = "0.1.5"
 edition = "2024"
 description = "windows tray app for masked proton mail otp notifications"
 
