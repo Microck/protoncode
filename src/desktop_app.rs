@@ -923,10 +923,10 @@ fn overlay_html() -> String {
         r#"
       :root {
         color-scheme: dark;
-        --bg: #0f1115;
+        --bg: #181818;
         --panel: rgba(15, 17, 21, 0.98);
         --surface: rgba(255, 255, 255, 0.03);
-        --border: #1e2128;
+        --border: #343434;
         --text: #e2e8f0;
         --muted: #64748b;
         --accent: #8b5cf6;
@@ -1186,8 +1186,8 @@ fn settings_html() -> String {
         r#"
       :root {
         color-scheme: dark;
-        --bg: #0f1115;
-        --border: #1e2128;
+        --bg: #181818;
+        --border: #343434;
         --muted: #64748b;
         --text: #e2e8f0;
         --accent: #8b5cf6;
@@ -1214,6 +1214,9 @@ fn settings_html() -> String {
       }
       ::selection {
         background: rgba(139, 92, 246, 0.3);
+      }
+      [hidden] {
+        display: none !important;
       }
       main {
         width: 100%;
@@ -1285,7 +1288,7 @@ fn settings_html() -> String {
         width: 58px;
         padding: 0 0 6px;
         border: 0;
-        border-bottom: 1px solid transparent;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.16);
         outline: none;
         background: transparent;
         color: #ffffff;
@@ -1301,9 +1304,11 @@ fn settings_html() -> String {
         -webkit-appearance: none;
         margin: 0;
       }
-      .number-group:hover input[type="number"],
+      .number-group:hover input[type="number"] {
+        border-bottom-color: rgba(255, 255, 255, 0.28);
+      }
       input[type="number"]:focus {
-        border-bottom-color: var(--border);
+        border-bottom-color: var(--accent);
       }
       .number-unit {
         padding-bottom: 10px;
@@ -1323,6 +1328,7 @@ fn settings_html() -> String {
         justify-content: space-between;
         gap: 20px;
         cursor: pointer;
+        padding: 6px 0;
       }
       .toggle-label {
         color: var(--muted);
@@ -1343,7 +1349,8 @@ fn settings_html() -> String {
         flex-shrink: 0;
         position: relative;
         border-radius: 999px;
-        background: var(--border);
+        background: #2b2b2b;
+        box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.06);
         transition: background 0.2s ease;
       }
       .toggle-switch::after {
@@ -1354,7 +1361,7 @@ fn settings_html() -> String {
         width: 12px;
         height: 12px;
         border-radius: 50%;
-        background: var(--muted);
+        background: #c1cad7;
         transition: all 0.2s ease;
       }
       .toggle-input:checked + .toggle-switch {
@@ -1628,15 +1635,15 @@ fn settings_html() -> String {
       });
 
       window.addEventListener("keydown", (event) => {
-        const modifierKeysPressed = (event.ctrlKey || event.metaKey)
-          && event.altKey
-          && event.shiftKey;
-
-        if (!modifierKeysPressed) {
+        if (event.defaultPrevented || event.repeat) {
           return;
         }
 
-        if (event.code === "KeyD") {
+        if (event.ctrlKey || event.metaKey || event.altKey) {
+          return;
+        }
+
+        if (event.code === "KeyP") {
           event.preventDefault();
           window.ipc.postMessage(JSON.stringify({ kind: "test_notification" }));
           return;
