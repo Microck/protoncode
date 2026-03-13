@@ -1,12 +1,12 @@
 #![cfg(windows)]
 
+use std::borrow::Cow;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result, anyhow};
 use arboard::Clipboard;
-use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 use tao::dpi::{LogicalPosition, LogicalSize};
 use tao::event::{Event, StartCause, WindowEvent};
@@ -17,7 +17,8 @@ use time::OffsetDateTime;
 use tracing::{error, info, warn};
 use tray_icon::TrayIconBuilder;
 use tray_icon::menu::{Menu, MenuEvent, MenuItem};
-use wry::http::Request;
+use wry::http::header::CONTENT_TYPE;
+use wry::http::{Request, Response, StatusCode};
 use wry::{WebContext, WebView, WebViewBuilder};
 
 use crate::app::AppState;
@@ -32,6 +33,10 @@ const PROTON_LOGIN_TITLE: &str = "Proton Mail - ProtonCode";
 const OVERLAY_WINDOW_TITLE: &str = "ProtonCode Notification";
 const OVERLAY_WIDTH: f64 = 420.0;
 const OVERLAY_HEIGHT: f64 = 236.0;
+const APP_PROTOCOL: &str = "protoncode";
+const APP_ICON_URL: &str = "protoncode://app/icon/protoncode.png";
+const OVERLAY_PAGE_URL: &str = "protoncode://app/overlay.html";
+const SETTINGS_PAGE_URL: &str = "protoncode://app/settings.html";
 
 pub fn run() -> Result<()> {
     let state = Arc::new(Mutex::new(AppState::load()?));
@@ -423,7 +428,10 @@ impl Windows {
         let overlay_proxy = proxy.clone();
         let overlay =
             WebViewBuilder::new()
-                .with_html(overlay_html())
+                .with_custom_protocol(APP_PROTOCOL.into(), |_webview_id, request| {
+                    app_protocol_response(request)
+                })
+                .with_url(OVERLAY_PAGE_URL)
                 .with_ipc_handler(move |payload: Request<String>| {
                     let parsed = serde_json::from_str::<OverlayAction>(payload.body())
                         .unwrap_or_else(|_| OverlayAction {
@@ -444,7 +452,10 @@ impl Windows {
 
         let settings_proxy = proxy.clone();
         let settings = WebViewBuilder::new()
-            .with_html(settings_html())
+            .with_custom_protocol(APP_PROTOCOL.into(), |_webview_id, request| {
+                app_protocol_response(request)
+            })
+            .with_url(SETTINGS_PAGE_URL)
             .with_ipc_handler(move |payload: Request<String>| {
                 if let Ok(parsed) = serde_json::from_str::<SettingsAction>(payload.body()) {
                     let _ = settings_proxy.send_event(UserEvent::SettingsAction(parsed));
@@ -687,7 +698,7 @@ fn overlay_html() -> String {
     <style>
 "#,
     );
-    html.push_str(&embedded_font_face_css());
+    html.push_str(embedded_font_face_css());
     html.push_str(
         r#"
       :root {
@@ -948,7 +959,7 @@ fn overlay_html() -> String {
 "#,
     );
 
-    html.replace("__APP_ICON__", &embedded_app_icon_data_url())
+    html.replace("__APP_ICON__", APP_ICON_URL)
 }
 
 fn settings_html() -> String {
@@ -961,7 +972,7 @@ fn settings_html() -> String {
     <style>
 "#,
     );
-    html.push_str(&embedded_font_face_css());
+    html.push_str(embedded_font_face_css());
     html.push_str(
         r#"
       :root {
@@ -1329,61 +1340,86 @@ fn settings_html() -> String {
 "#,
     );
 
-    html.replace("__APP_ICON__", &embedded_app_icon_data_url())
+    html.replace("__APP_ICON__", APP_ICON_URL)
 }
 
-fn embedded_font_face_css() -> String {
-    format!(
-        r#"
-      @font-face {{
+fn embedded_font_face_css() -> &'static str {
+    r#"
+      @font-face {
         font-family: "Arizona Sans Local";
-        src: url("{}") format("truetype");
+        src: url("protoncode://app/fonts/arizona-sans.ttf") format("truetype");
         font-style: normal;
         font-weight: 100 700;
         font-display: swap;
-      }}
-      @font-face {{
+      }
+      @font-face {
         font-family: "Arizona Flare Local";
-        src: url("{}") format("truetype");
+        src: url("protoncode://app/fonts/arizona-flare.ttf") format("truetype");
         font-style: normal;
         font-weight: 100 700;
         font-display: swap;
-      }}
-      @font-face {{
+      }
+      @font-face {
         font-family: "Ubuntu Local";
-        src: url("{}") format("truetype");
+        src: url("protoncode://app/fonts/ubuntu-r.ttf") format("truetype");
         font-style: normal;
         font-weight: 400;
-      }}
-      @font-face {{
+      }
+      @font-face {
         font-family: "Ubuntu Local";
-        src: url("{}") format("truetype");
+        src: url("protoncode://app/fonts/ubuntu-m.ttf") format("truetype");
         font-style: normal;
         font-weight: 500 700;
-      }}
-"#,
-        embedded_data_url(
-            "font/ttf",
-            include_bytes!("../assets/ABCArizonaSansVariable-Trial.ttf")
-        ),
-        embedded_data_url(
-            "font/ttf",
-            include_bytes!("../assets/ABCArizonaFlareVariable-Trial.ttf")
-        ),
-        embedded_data_url("font/ttf", include_bytes!("../assets/ubuntu-r.ttf")),
-        embedded_data_url("font/ttf", include_bytes!("../assets/ubuntu-m.ttf"))
-    )
+      }
+"#
 }
 
-fn embedded_app_icon_data_url() -> String {
-    embedded_data_url("image/png", include_bytes!("../assets/protoncode-icon.png"))
+fn app_protocol_response(request: Request<Vec<u8>>) -> Response<Cow<'static, [u8]>> {
+    let path = request.uri().path();
+
+    match path {
+        "/overlay.html" => html_response(overlay_html()),
+        "/settings.html" => html_response(settings_html()),
+        "/fonts/arizona-sans.ttf" => asset_response(
+            "font/ttf",
+            include_bytes!("../assets/ABCArizonaSansVariable-Trial.ttf"),
+        ),
+        "/fonts/arizona-flare.ttf" => asset_response(
+            "font/ttf",
+            include_bytes!("../assets/ABCArizonaFlareVariable-Trial.ttf"),
+        ),
+        "/fonts/ubuntu-r.ttf" => {
+            asset_response("font/ttf", include_bytes!("../assets/ubuntu-r.ttf"))
+        }
+        "/fonts/ubuntu-m.ttf" => {
+            asset_response("font/ttf", include_bytes!("../assets/ubuntu-m.ttf"))
+        }
+        "/icon/protoncode.png" => {
+            asset_response("image/png", include_bytes!("../assets/protoncode-icon.png"))
+        }
+        _ => Response::builder()
+            .status(StatusCode::NOT_FOUND)
+            .header(CONTENT_TYPE, "text/plain; charset=utf-8")
+            .body(Cow::Borrowed(&b"Not Found"[..]))
+            .expect("valid 404 response"),
+    }
 }
 
-fn embedded_data_url(mime: &str, bytes: &[u8]) -> String {
-    format!(
-        "data:{mime};base64,{}",
-        base64::engine::general_purpose::STANDARD.encode(bytes)
-    )
+fn html_response(html: String) -> Response<Cow<'static, [u8]>> {
+    Response::builder()
+        .header(CONTENT_TYPE, "text/html; charset=utf-8")
+        .body(Cow::Owned(html.into_bytes()))
+        .expect("valid html response")
+}
+
+fn asset_response(
+    content_type: &'static str,
+    bytes: &'static [u8],
+) -> Response<Cow<'static, [u8]>> {
+    Response::builder()
+        .header(CONTENT_TYPE, content_type)
+        .body(Cow::Borrowed(bytes))
+        .expect("valid asset response")
 }
 
 fn app_icon() -> Result<tray_icon::Icon> {

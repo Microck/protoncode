@@ -1839,7 +1839,6 @@ version = "0.1.2"
 dependencies = [
  "anyhow",
  "arboard",
- "base64",
  "crossbeam-channel",
  "dirs",
  "image",
