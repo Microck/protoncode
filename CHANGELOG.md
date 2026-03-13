@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.3](https://github.com/Microck/protoncode/compare/v0.1.2...v0.1.3) (2026-03-13)
+
+
+### Bug Fixes
+
+* **windows:** load ui assets through a custom protocol ([a8d7cd6](https://github.com/Microck/protoncode/commit/a8d7cd6de0bf550c2fd76ea210111a507a1a3bec))
+
 ## [0.1.2](https://github.com/Microck/protoncode/compare/v0.1.1...v0.1.2) (2026-03-13)
 
 
