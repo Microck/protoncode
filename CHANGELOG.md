@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.2](https://github.com/Microck/protoncode/compare/v0.2.1...v0.2.2) (2026-03-14)
+
+
+### Bug Fixes
+
+* **ui:** improve control contrast and debug keys ([aa07fd4](https://github.com/Microck/protoncode/commit/aa07fd45a1186ca80eb0129ffc38a2ad44d889b1))
+
 ## [0.2.1](https://github.com/Microck/protoncode/compare/v0.2.0...v0.2.1) (2026-03-13)
 
 
