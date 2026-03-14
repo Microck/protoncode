@@ -1,7 +1,6 @@
 use std::borrow::Cow;
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
 use arboard::Clipboard;
@@ -45,6 +44,7 @@ const SETTINGS_PAGE_URL: &str = "protoncode://app/settings.html";
 const WEBVIEW2_DEFAULT_BACKGROUND_COLOR: &str = "WEBVIEW2_DEFAULT_BACKGROUND_COLOR";
 const WEBVIEW2_OVERLAY_BACKGROUND: &str = "00000000";
 const WEBVIEW2_APP_BACKGROUND: &str = "FF181818";
+const STARTUP_PROTON_DEFER_MS: u64 = 650;
 
 pub fn run() -> Result<()> {
     let state = Arc::new(Mutex::new(AppState::load()?));
@@ -85,8 +85,12 @@ pub fn run() -> Result<()> {
                 if let Ok(state) = lock_state(&state) {
                     let _ = refresh_settings(&windows.settings, &state);
                 }
-                let _ = proxy.send_event(UserEvent::EnsureProtonWebview {
-                    show_window: show_proton_on_start,
+                let deferred_proxy = proxy.clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(Duration::from_millis(STARTUP_PROTON_DEFER_MS));
+                    let _ = deferred_proxy.send_event(UserEvent::EnsureProtonWebview {
+                        show_window: show_proton_on_start,
+                    });
                 });
             }
             Event::UserEvent(UserEvent::TrayMenu(menu_id)) => {
@@ -259,34 +263,47 @@ fn handle_proton_snapshot(
         windows.proton_window.set_focus();
     }
 
-    let mut state_guard = lock_state(state)?;
-    if state_guard.session_state == MailSessionState::Paused {
-        return Ok(());
+    let mut notification_to_show = None;
+    let monitored_mailbox = snapshot
+        .mailbox_label
+        .clone()
+        .unwrap_or_else(|| "All Mail".to_owned());
+
+    {
+        let mut state_guard = lock_state(state)?;
+        if let Some(debug_log) = snapshot.debug_log.as_deref() {
+            state_guard.push_debug_log(debug_log);
+        }
+
+        if state_guard.session_state == MailSessionState::Paused {
+            refresh_settings(&windows.settings, &state_guard)?;
+            return Ok(());
+        }
+
+        if session_state == MailSessionState::Authenticated && !snapshot.all_mail_ready {
+            refresh_settings(&windows.settings, &state_guard)?;
+            return Ok(());
+        }
+
+        let copy_enabled = state_guard.config.copy_button_enabled;
+        for candidate in &snapshot.candidates {
+            if let Some(notification) = state_guard.register_candidate(candidate) {
+                state_guard.push_debug_log(format!(
+                    "OTP matched in {}: {}",
+                    monitored_mailbox, notification.masked_code
+                ));
+                notification_to_show = Some((notification, copy_enabled));
+                break;
+            }
+        }
+
+        refresh_settings(&windows.settings, &state_guard)?;
     }
 
-    let candidate = OtpCandidateEmail {
-        message_id: fingerprint_snapshot(&snapshot),
-        sender: None,
-        subject: Some(snapshot.title.clone()),
-        received_at: OffsetDateTime::now_utc(),
-        body_text: snapshot.text,
-    };
-
-    if let Some(notification) = state_guard.register_candidate(&candidate) {
-        state_guard.push_debug_log(format!(
-            "OTP matched for overlay: {}",
-            notification.masked_code
-        ));
-        show_overlay(
-            windows,
-            proxy,
-            state,
-            &notification,
-            state_guard.config.copy_button_enabled,
-        )?;
+    if let Some((notification, copy_enabled)) = notification_to_show {
+        show_overlay(windows, proxy, state, &notification, copy_enabled)?;
     }
 
-    refresh_settings(&windows.settings, &state_guard)?;
     Ok(())
 }
 
@@ -420,7 +437,7 @@ fn position_overlay(window: &Window) -> Result<()> {
 
 fn infer_session_state(snapshot: &ProtonSnapshot) -> MailSessionState {
     let url = snapshot.url.as_str();
-    let text = snapshot.text.to_lowercase();
+    let text = snapshot.page_text.to_lowercase();
 
     if url.contains("mail.proton.me") {
         MailSessionState::Authenticated
@@ -444,14 +461,6 @@ fn session_state_label(state: MailSessionState) -> &'static str {
         MailSessionState::Error => "Attention needed",
         MailSessionState::Paused => "Monitoring paused",
     }
-}
-
-fn fingerprint_snapshot(snapshot: &ProtonSnapshot) -> String {
-    let mut hasher = DefaultHasher::new();
-    snapshot.url.hash(&mut hasher);
-    snapshot.title.hash(&mut hasher);
-    snapshot.text.hash(&mut hasher);
-    format!("snapshot-{:016x}", hasher.finish())
 }
 
 fn lock_state(state: &Arc<Mutex<AppState>>) -> Result<std::sync::MutexGuard<'_, AppState>> {
@@ -672,19 +681,19 @@ impl Windows {
             .build(event_loop)
             .context("failed to build overlay window")?;
 
-        let overlay_proxy = proxy.clone();
-        let overlay = build_overlay_webview(&overlay_window, overlay_proxy)
-            .context("failed to build overlay webview")?;
         #[cfg(windows)]
         push_debug_log(
             &state,
             format!(
-                "Overlay window created with no_redirection_bitmap=true and WebView2 background {}",
+                "Overlay window created; webview deferred until first notification. no_redirection_bitmap=true, background {}",
                 WEBVIEW2_OVERLAY_BACKGROUND
             ),
         );
         #[cfg(not(windows))]
-        push_debug_log(&state, "Overlay window created");
+        push_debug_log(
+            &state,
+            "Overlay window created; webview deferred until first notification",
+        );
 
         let settings_window = WindowBuilder::new()
             .with_title(SETTINGS_HTML_TITLE)
@@ -724,7 +733,7 @@ impl Windows {
 
         Ok(Self {
             overlay_window,
-            overlay: Some(overlay),
+            overlay: None,
             settings_window,
             settings,
             proton_window,
@@ -745,12 +754,12 @@ impl Windows {
             push_debug_log(
                 state,
                 format!(
-                    "Overlay webview reinitialized with no_redirection_bitmap=true and background {}",
+                    "Overlay webview initialized lazily with no_redirection_bitmap=true and background {}",
                     WEBVIEW2_OVERLAY_BACKGROUND
                 ),
             );
             #[cfg(not(windows))]
-            push_debug_log(state, "Overlay webview reinitialized");
+            push_debug_log(state, "Overlay webview initialized lazily");
         }
         Ok(())
     }
@@ -851,8 +860,15 @@ struct SettingsAction {
 #[derive(Debug, Clone, Deserialize)]
 struct ProtonSnapshot {
     url: String,
-    title: String,
-    text: String,
+    page_text: String,
+    #[serde(default)]
+    mailbox_label: Option<String>,
+    #[serde(default)]
+    all_mail_ready: bool,
+    #[serde(default)]
+    debug_log: Option<String>,
+    #[serde(default)]
+    candidates: Vec<OtpCandidateEmail>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -926,30 +942,276 @@ impl SettingsSnapshot {
 }
 
 fn proton_monitor_script(poll_interval_seconds: u64) -> String {
-    format!(
-        r#"
-(() => {{
+    let schedule_ms = (poll_interval_seconds.max(5) * 1000).to_string();
+    r#"
+(() => {
   const OTP_TERMS = /(code|verification|2fa|two-factor|two factor|one-time|one time|otp|security|passcode|sign in|signin)/i;
+  const DIGIT_SEQUENCE = /\b((?:[0-9][\s-]?){3,7}[0-9])\b/;
+  const ALL_MAIL_LABEL = "all mail";
+  const MORE_LABEL = "more";
+  const MAX_ROW_SCAN = 20;
+  const CLICK_THROTTLE_MS = 2500;
+  const OPEN_MESSAGE_TIMEOUT_MS = 5000;
+  const FALLBACK_ATTEMPT_LIMIT = 64;
 
-  const normalizeBlock = (value) => value
+  const state = {
+    pendingOpenedId: null,
+    pendingOpenedBaseline: null,
+    pendingOpenedRequestedAt: 0,
+    fallbackAttempted: [],
+    fallbackAttemptedSet: new Set(),
+    lastAllMailClickAt: 0,
+    lastMoreClickAt: 0,
+    lastDebugLog: "",
+    pendingDebugLog: null,
+  };
+
+  const normalizeBlock = (value) => (value || "")
     .replace(/\u00a0/g, " ")
     .replace(/\r/g, "\n")
     .replace(/[ \t]+/g, " ")
-    .replace(/\n{{3,}}/g, "\n\n")
+    .replace(/\n{3,}/g, "\n\n")
     .trim();
 
-  const isVisible = (element) => {{
-    if (!element || typeof element.getClientRects !== "function") {{
-      return false;
-    }}
-    return element.getClientRects().length > 0;
-  }};
+  const linesOf = (value) => normalizeBlock(value)
+    .split(/\n+/)
+    .map((line) => line.trim())
+    .filter(Boolean);
 
-  const collectRelevantText = () => {{
+  const uniqueLines = (lines) => {
+    const seen = new Set();
+    return lines.filter((line) => {
+      const key = line.toLowerCase();
+      if (seen.has(key)) {
+        return false;
+      }
+      seen.add(key);
+      return true;
+    });
+  };
+
+  const normalizeMatchText = (value) => uniqueLines(linesOf(value)).join(" ").toLowerCase();
+  const textOf = (node) => normalizeBlock(node?.innerText || node?.textContent || "");
+  const nowIso = () => new Date().toISOString();
+
+  const isVisible = (element) => {
+    if (!element || typeof element.getClientRects !== "function") {
+      return false;
+    }
+    return element.getClientRects().length > 0;
+  };
+
+  const queueDebugLog = (message) => {
+    if (!message || state.lastDebugLog === message) {
+      return;
+    }
+    state.pendingDebugLog = message;
+    state.lastDebugLog = message;
+  };
+
+  const drainDebugLog = () => {
+    const message = state.pendingDebugLog;
+    state.pendingDebugLog = null;
+    return message;
+  };
+
+  const collectVisibleNodes = (selectors, limit = Number.POSITIVE_INFINITY) => {
+    const nodes = [];
+    const seen = new Set();
+    for (const selector of selectors) {
+      for (const node of document.querySelectorAll(selector)) {
+        if (!isVisible(node) || seen.has(node)) {
+          continue;
+        }
+        seen.add(node);
+        nodes.push(node);
+        if (nodes.length >= limit) {
+          return nodes;
+        }
+      }
+    }
+    return nodes;
+  };
+
+  const clickableTarget = (node) => node?.closest?.('button, a, [role="button"], [role="link"], [tabindex]') || node;
+  const clickElement = (node) => {
+    const target = clickableTarget(node);
+    if (!target || typeof target.click !== "function") {
+      return false;
+    }
+    target.click();
+    return true;
+  };
+
+  const fingerprint = (value) => {
+    let hash = 2166136261;
+    for (const char of value) {
+      hash ^= char.charCodeAt(0);
+      hash = Math.imul(hash, 16777619);
+    }
+    return (hash >>> 0).toString(16).padStart(8, "0");
+  };
+
+  const findMailboxButton = (label) => {
     const selectors = [
-      '[data-testid*="message"]',
+      '[data-testid*="navigation"] button',
+      '[data-testid*="navigation"] a',
+      '[data-testid*="sidebar"] button',
+      '[data-testid*="sidebar"] a',
+      '[role="navigation"] button',
+      '[role="navigation"] a',
+      'nav button',
+      'nav a'
+    ];
+    const nodes = collectVisibleNodes(selectors, 96);
+    const exactMatch = nodes.find((node) => {
+      const text = normalizeMatchText(node.innerText || node.textContent || "");
+      return text === label || text.startsWith(`${label} `) || text.endsWith(` ${label}`);
+    });
+    if (exactMatch) {
+      return exactMatch;
+    }
+    return nodes.find((node) => normalizeMatchText(node.innerText || node.textContent || "").includes(label)) || null;
+  };
+
+  const currentMailboxLabel = () => {
+    if (window.location.href.toLowerCase().includes("all-mail")) {
+      return ALL_MAIL_LABEL;
+    }
+    const selectors = [
+      '[aria-current="page"]',
+      '[aria-selected="true"]',
+      '[data-testid*="sidebar"] [aria-checked="true"]',
+      'nav [aria-current="page"]',
+      'nav [aria-selected="true"]'
+    ];
+    const active = collectVisibleNodes(selectors, 10);
+    for (const node of active) {
+      const text = normalizeMatchText(node.innerText || node.textContent || "");
+      if (text) {
+        return text;
+      }
+    }
+    return null;
+  };
+
+  const ensureAllMailView = () => {
+    if (!window.location.href.includes("mail.proton.me")) {
+      return { ready: false, label: null };
+    }
+
+    const currentLabel = currentMailboxLabel();
+    if (currentLabel && currentLabel.includes(ALL_MAIL_LABEL)) {
+      return { ready: true, label: currentLabel };
+    }
+
+    const now = Date.now();
+    const allMailButton = findMailboxButton(ALL_MAIL_LABEL);
+    if (allMailButton) {
+      if (now - state.lastAllMailClickAt > CLICK_THROTTLE_MS && clickElement(allMailButton)) {
+        state.lastAllMailClickAt = now;
+        queueDebugLog("Navigating Proton monitor to All Mail");
+      }
+      return { ready: false, label: currentLabel };
+    }
+
+    const moreButton = findMailboxButton(MORE_LABEL);
+    if (moreButton) {
+      if (now - state.lastMoreClickAt > CLICK_THROTTLE_MS && clickElement(moreButton)) {
+        state.lastMoreClickAt = now;
+        queueDebugLog("Expanding Proton mailbox list");
+      }
+      return { ready: false, label: currentLabel };
+    }
+
+    queueDebugLog("All Mail mailbox not found in Proton navigation");
+    return { ready: false, label: currentLabel };
+  };
+
+  const extractRowMetadata = (text) => {
+    const lines = uniqueLines(linesOf(text)).filter((line) => line.length >= 2);
+    const sender = lines[0] || null;
+    const subject = lines[1] || lines[0] || "Proton Mail";
+    const snippet = lines.slice(2).join(" ");
+    return { sender, subject, snippet, lineCount: lines.length };
+  };
+
+  const buildRowCandidate = (node, mailboxLabel) => {
+    const text = textOf(node);
+    if (text.length < 12) {
+      return null;
+    }
+
+    const metadata = extractRowMetadata(text);
+    if (metadata.lineCount > 8 || text.length > 420) {
+      return null;
+    }
+
+    const hasCode = DIGIT_SEQUENCE.test(text);
+    if (!hasCode && !OTP_TERMS.test(text)) {
+      return null;
+    }
+
+    const stableKey = [
+      mailboxLabel || "",
+      node.getAttribute?.("data-testid") || "",
+      node.getAttribute?.("data-id") || "",
+      node.id || "",
+      metadata.sender || "",
+      metadata.subject || "",
+      metadata.snippet || ""
+    ].join("|") || text;
+
+    return {
+      node,
+      fullText: text,
+      hasCode,
+      candidate: {
+        message_id: `all-mail-${fingerprint(stableKey)}`,
+        sender: metadata.sender,
+        subject: metadata.subject,
+        received_at: nowIso(),
+        body_text: text
+      }
+    };
+  };
+
+  const collectRowCandidates = (mailboxLabel) => {
+    const selectors = [
       '[data-testid*="conversation"]',
+      '[data-testid*="item-row"]',
+      '[data-testid*="message-row"]',
       '[data-testid*="item"]',
+      '[role="main"] [role="row"]',
+      'main [role="row"]',
+      '[role="main"] article',
+      'main article'
+    ];
+
+    const rows = collectVisibleNodes(selectors, MAX_ROW_SCAN * 4);
+    const seenIds = new Set();
+    const candidates = [];
+
+    for (const row of rows) {
+      const candidate = buildRowCandidate(row, mailboxLabel);
+      if (!candidate || seenIds.has(candidate.candidate.message_id)) {
+        continue;
+      }
+      seenIds.add(candidate.candidate.message_id);
+      candidates.push(candidate);
+      if (candidates.length >= MAX_ROW_SCAN) {
+        break;
+      }
+    }
+
+    return candidates;
+  };
+
+  const collectOpenedMessageText = () => {
+    const selectors = [
+      '[data-testid*="message-body"]',
+      '[data-testid*="message-content"]',
+      '[data-testid*="conversation"] [data-testid*="message"]',
       '[role="main"] article',
       '[role="main"] section',
       'main article',
@@ -960,69 +1222,155 @@ fn proton_monitor_script(poll_interval_seconds: u64) -> String {
 
     const blocks = [];
     const seen = new Set();
-    const maybeAddBlock = (rawText) => {{
-      const normalized = normalizeBlock(rawText || "");
-      if (normalized.length < 12 || seen.has(normalized)) {{
-        return;
-      }}
-      if (!OTP_TERMS.test(normalized) && !/\d{{4,8}}/.test(normalized)) {{
-        return;
-      }}
-      seen.add(normalized);
-      blocks.push(normalized);
-    }};
-
-    for (const selector of selectors) {{
-      const nodes = document.querySelectorAll(selector);
-      for (const node of nodes) {{
-        if (!isVisible(node)) {{
+    for (const selector of selectors) {
+      for (const node of document.querySelectorAll(selector)) {
+        if (!isVisible(node)) {
           continue;
-        }}
-        maybeAddBlock(node.innerText || node.textContent || "");
-        if (blocks.length >= 8) {{
-          return blocks.join("\n\n");
-        }}
-      }}
-    }}
+        }
+        const text = textOf(node);
+        if (text.length < 24 || seen.has(text)) {
+          continue;
+        }
+        seen.add(text);
+        blocks.push(text);
+        if (blocks.length >= 6) {
+          return blocks.join("\n\n").slice(0, 40000);
+        }
+      }
+    }
 
-    const bodyText = normalizeBlock(document.body?.innerText || "");
-    if (blocks.length) {{
-      return blocks.join("\n\n").slice(0, 40000);
-    }}
-    return bodyText.slice(0, 40000);
-  }};
+    return blocks.join("\n\n").slice(0, 40000);
+  };
 
-  const collectSnapshotTitle = (snapshotText) => {{
-    const firstUsefulLine = snapshotText
-      .split(/\n+/)
-      .map((line) => normalizeBlock(line))
-      .find((line) => line.length >= 6);
-    return firstUsefulLine || document.title || "Proton Mail";
-  }};
+  const rememberFallbackAttempt = (messageId) => {
+    if (state.fallbackAttemptedSet.has(messageId)) {
+      return;
+    }
+    state.fallbackAttempted.push(messageId);
+    state.fallbackAttemptedSet.add(messageId);
+    while (state.fallbackAttempted.length > FALLBACK_ATTEMPT_LIMIT) {
+      const staleId = state.fallbackAttempted.shift();
+      state.fallbackAttemptedSet.delete(staleId);
+    }
+  };
 
-  const sendSnapshot = () => {{
-    const snapshotText = collectRelevantText();
-    const payload = {{
+  const clearPendingOpen = () => {
+    state.pendingOpenedId = null;
+    state.pendingOpenedBaseline = null;
+    state.pendingOpenedRequestedAt = 0;
+  };
+
+  const maybeOpenFallbackCandidate = (rowCandidates) => {
+    if (state.pendingOpenedId) {
+      return false;
+    }
+
+    const fallback = rowCandidates.find((candidate) =>
+      !candidate.hasCode && !state.fallbackAttemptedSet.has(candidate.candidate.message_id)
+    );
+    if (!fallback) {
+      return false;
+    }
+
+    rememberFallbackAttempt(fallback.candidate.message_id);
+    state.pendingOpenedId = fallback.candidate.message_id;
+    state.pendingOpenedBaseline = fallback.fullText;
+    state.pendingOpenedRequestedAt = Date.now();
+
+    if (clickElement(fallback.node)) {
+      queueDebugLog("Opening All Mail message for OTP fallback");
+      return true;
+    }
+
+    clearPendingOpen();
+    queueDebugLog("Failed to open All Mail message for OTP fallback");
+    return false;
+  };
+
+  const collectOpenedMessageCandidate = () => {
+    if (!state.pendingOpenedId) {
+      return null;
+    }
+
+    const openedText = collectOpenedMessageText();
+    if (!openedText) {
+      if (Date.now() - state.pendingOpenedRequestedAt > OPEN_MESSAGE_TIMEOUT_MS) {
+        queueDebugLog("Opened All Mail message did not expose readable content");
+        clearPendingOpen();
+      }
+      return null;
+    }
+
+    if (openedText === state.pendingOpenedBaseline && Date.now() - state.pendingOpenedRequestedAt < OPEN_MESSAGE_TIMEOUT_MS) {
+      return null;
+    }
+
+    const candidate = {
+      message_id: state.pendingOpenedId,
+      sender: null,
+      subject: null,
+      received_at: nowIso(),
+      body_text: openedText
+    };
+    clearPendingOpen();
+    queueDebugLog("Parsed opened All Mail message for OTP fallback");
+    return candidate;
+  };
+
+  const collectPageText = () => normalizeBlock(document.body?.innerText || "").slice(0, 40000);
+
+  const sendSnapshot = () => {
+    const isMailPage = window.location.href.includes("mail.proton.me");
+    const mailboxState = isMailPage ? ensureAllMailView() : { ready: false, label: null };
+    const candidates = [];
+
+    if (isMailPage && mailboxState.ready) {
+      const rowCandidates = collectRowCandidates(mailboxState.label);
+      if (rowCandidates.length > 0) {
+        queueDebugLog(`All Mail scan found ${rowCandidates.length} OTP-like rows`);
+      }
+
+      const openedCandidate = collectOpenedMessageCandidate();
+      if (openedCandidate) {
+        candidates.push(openedCandidate);
+      }
+
+      const directCandidates = rowCandidates
+        .filter((candidate) => candidate.hasCode)
+        .map((candidate) => candidate.candidate)
+        .slice(0, 5);
+      candidates.push(...directCandidates);
+
+      if (!openedCandidate && directCandidates.length === 0) {
+        maybeOpenFallbackCandidate(rowCandidates);
+      }
+    }
+
+    const payload = {
       kind: "snapshot",
       url: window.location.href,
-      title: collectSnapshotTitle(snapshotText),
-      text: snapshotText
-    }};
-    window.ipc.postMessage(JSON.stringify(payload));
-  }};
+      page_text: collectPageText(),
+      mailbox_label: mailboxState.label || null,
+      all_mail_ready: Boolean(mailboxState.ready),
+      debug_log: drainDebugLog(),
+      candidates
+    };
 
-  const schedule = Math.max({poll_interval_seconds}, 5) * 1000;
+    window.ipc.postMessage(JSON.stringify(payload));
+  };
+
+  const schedule = __SCHEDULE_MS__;
   window.addEventListener("load", () => setTimeout(sendSnapshot, 1500));
   document.addEventListener("visibilitychange", sendSnapshot);
-  new MutationObserver(() => {{
+  new MutationObserver(() => {
     window.clearTimeout(window.__protoncodeMutationTimer);
     window.__protoncodeMutationTimer = window.setTimeout(sendSnapshot, 800);
-  }}).observe(document.documentElement, {{ childList: true, subtree: true, characterData: true }});
+  }).observe(document.documentElement, { childList: true, subtree: true, characterData: true });
   window.setInterval(sendSnapshot, schedule);
   sendSnapshot();
-}})();
+})();
 "#
-    )
+    .replace("__SCHEDULE_MS__", &schedule_ms)
 }
 
 fn overlay_html() -> String {
@@ -1044,7 +1392,6 @@ fn overlay_html() -> String {
         --bg: #181818;
         --panel: rgba(24, 24, 24, 0.94);
         --surface: rgba(255, 255, 255, 0.04);
-        --border: rgba(139, 92, 246, 0.2);
         --text: #e2e8f0;
         --muted: #64748b;
         --accent: #8b5cf6;
@@ -1076,10 +1423,9 @@ fn overlay_html() -> String {
         height: 100%;
         padding: 18px;
         border-radius: 22px;
-        border: 1px solid var(--border);
         background: var(--panel);
         color: var(--text);
-        box-shadow: 0 24px 60px rgba(0, 0, 0, 0.42), inset 0 1px 0 rgba(255, 255, 255, 0.04);
+        box-shadow: 0 24px 60px rgba(0, 0, 0, 0.42);
         display: flex;
         flex-direction: column;
         gap: 12px;
@@ -1123,15 +1469,6 @@ fn overlay_html() -> String {
         font-weight: 400;
         letter-spacing: -0.02em;
       }
-      .version {
-        color: var(--muted);
-        font-size: 10px;
-        font-weight: 500;
-        letter-spacing: 0.22em;
-        text-transform: uppercase;
-        border-bottom: 1px solid var(--border);
-        padding-bottom: 4px;
-      }
       .dismiss {
         width: 32px;
         height: 32px;
@@ -1166,8 +1503,7 @@ fn overlay_html() -> String {
         min-width: 0;
         padding: 0 16px;
         border-radius: 16px;
-        border: 1px solid var(--border);
-        background: var(--surface);
+        background: rgba(255, 255, 255, 0.06);
         color: #ffffff;
         display: flex;
         align-items: center;
@@ -1187,22 +1523,21 @@ fn overlay_html() -> String {
       }
       button {
         appearance: none;
-        border: 1px solid rgba(255, 255, 255, 0.08);
+        border: 0;
         border-radius: 999px;
         padding: 10px 14px;
         min-width: 0;
-        background: rgba(255, 255, 255, 0.04);
+        background: rgba(255, 255, 255, 0.05);
         color: var(--muted);
         font-family: var(--font);
         font-size: 12px;
         font-weight: 400;
         cursor: pointer;
-        transition: color 0.2s ease, border-color 0.2s ease, background 0.2s ease;
+        transition: color 0.2s ease, background 0.2s ease;
       }
       button:hover {
         color: #ffffff;
-        border-color: rgba(139, 92, 246, 0.4);
-        background: rgba(139, 92, 246, 0.12);
+        background: rgba(139, 92, 246, 0.16);
       }
       .icon-button {
         width: 44px;
@@ -2111,13 +2446,23 @@ fn settings_html() -> String {
 mod desktop_tests {
     use super::{MailSessionState, ProtonSnapshot, infer_session_state};
 
+    fn snapshot(url: &str, page_text: &str) -> ProtonSnapshot {
+        ProtonSnapshot {
+            url: url.to_owned(),
+            page_text: page_text.to_owned(),
+            mailbox_label: Some("all mail".to_owned()),
+            all_mail_ready: true,
+            debug_log: None,
+            candidates: Vec::new(),
+        }
+    }
+
     #[test]
     fn mail_page_is_not_marked_signed_out_when_message_mentions_sign_in() {
-        let snapshot = ProtonSnapshot {
-            url: "https://mail.proton.me/u/0/inbox".to_owned(),
-            title: "Inbox | Proton Mail".to_owned(),
-            text: "Your verification code is 123456. Use it to sign in.".to_owned(),
-        };
+        let snapshot = snapshot(
+            "https://mail.proton.me/u/0/all-mail",
+            "Your verification code is 123456. Use it to sign in.",
+        );
 
         assert_eq!(
             infer_session_state(&snapshot),
@@ -2127,11 +2472,7 @@ mod desktop_tests {
 
     #[test]
     fn account_login_page_is_marked_unauthenticated() {
-        let snapshot = ProtonSnapshot {
-            url: "https://account.proton.me/login".to_owned(),
-            title: "Proton Login".to_owned(),
-            text: "Sign in to Proton".to_owned(),
-        };
+        let snapshot = snapshot("https://account.proton.me/login", "Sign in to Proton");
 
         assert_eq!(
             infer_session_state(&snapshot),

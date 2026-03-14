@@ -156,6 +156,19 @@ mod tests {
     }
 
     #[test]
+    fn detects_code_from_all_mail_row_surface() {
+        let mut candidate = email("Acme\nVerification code\n123456\nExpires in 10 minutes");
+        candidate.sender = Some("Acme".to_owned());
+        candidate.subject = Some("Verification code".to_owned());
+
+        let result = detect_otp(&candidate);
+        assert_eq!(
+            result.as_ref().map(|value| value.code.as_str()),
+            Some("123456")
+        );
+    }
+
+    #[test]
     fn uses_subject_context_when_body_contains_only_code() {
         let mut candidate = email("123456");
         candidate.subject = Some("Security code".to_owned());
@@ -174,5 +187,19 @@ mod tests {
 
         let result = detect_otp(&candidate);
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn detects_code_after_opened_message_fallback() {
+        let mut candidate = email(
+            "Acme security notice\nUse verification code 778899 to finish signing in.\nThis code expires in 10 minutes.",
+        );
+        candidate.subject = Some("Security notice".to_owned());
+
+        let result = detect_otp(&candidate);
+        assert_eq!(
+            result.as_ref().map(|value| value.code.as_str()),
+            Some("778899")
+        );
     }
 }
