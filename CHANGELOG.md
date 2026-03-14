@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.4](https://github.com/Microck/protoncode/compare/v0.2.3...v0.2.4) (2026-03-14)
+
+
+### Bug Fixes
+
+* **ui:** improve overlay transparency and startup ([d906835](https://github.com/Microck/protoncode/commit/d90683565447560eca0fcef6e72c36813d1f1693))
+
 ## [0.2.3](https://github.com/Microck/protoncode/compare/v0.2.2...v0.2.3) (2026-03-14)
 
 
