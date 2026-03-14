@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.5](https://github.com/Microck/protoncode/compare/v0.2.4...v0.2.5) (2026-03-14)
+
+
+### Bug Fixes
+
+* **ui:** harden notification transparency ([e985771](https://github.com/Microck/protoncode/commit/e98577165561d08bb1be08f054c2b11544bb8f75))
+
 ## [0.2.4](https://github.com/Microck/protoncode/compare/v0.2.3...v0.2.4) (2026-03-14)
 
 
