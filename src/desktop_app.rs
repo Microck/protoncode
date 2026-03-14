@@ -37,16 +37,26 @@ const SETTINGS_HTML_TITLE: &str = "ProtonCode";
 const PROTON_LOGIN_TITLE: &str = "Proton Mail - ProtonCode";
 const OVERLAY_WINDOW_TITLE: &str = "ProtonCode Notification";
 const OVERLAY_WIDTH: f64 = 420.0;
-const OVERLAY_HEIGHT: f64 = 248.0;
+const OVERLAY_HEIGHT: f64 = 276.0;
 const APP_PROTOCOL: &str = "protoncode";
 const OVERLAY_PAGE_URL: &str = "protoncode://app/overlay.html";
 const SETTINGS_PAGE_URL: &str = "protoncode://app/settings.html";
+#[cfg(windows)]
+const WEBVIEW2_DEFAULT_BACKGROUND_COLOR: &str = "WEBVIEW2_DEFAULT_BACKGROUND_COLOR";
+const WEBVIEW2_OVERLAY_BACKGROUND: &str = "00000000";
+const WEBVIEW2_APP_BACKGROUND: &str = "FF181818";
 
 pub fn run() -> Result<()> {
     let state = Arc::new(Mutex::new(AppState::load()?));
     reconcile_launch_on_startup(&state)?;
     let secrets = SecretStore::new();
     let launched_from_autostart = autostart::has_autostart_flag(std::env::args_os());
+    let show_proton_on_start = !launched_from_autostart
+        && !state
+            .lock()
+            .map_err(|_| anyhow!("app state poisoned"))?
+            .config
+            .start_minimized_to_tray;
 
     let mut event_loop_builder = EventLoopBuilder::<UserEvent>::with_user_event();
     #[cfg(target_os = "linux")]
@@ -55,7 +65,7 @@ pub fn run() -> Result<()> {
     let proxy = event_loop.create_proxy();
     install_menu_event_handler(proxy.clone());
 
-    let windows = Windows::build(&event_loop, proxy.clone(), state.clone())?;
+    let mut windows = Windows::build(&event_loop, proxy.clone(), state.clone())?;
     let tray = AppTray::build()?;
 
     if let Some(marker) = secrets.load_session_marker()? {
@@ -67,18 +77,6 @@ pub fn run() -> Result<()> {
         )?;
     }
 
-    if launched_from_autostart
-        || state
-            .lock()
-            .map_err(|_| anyhow!("app state poisoned"))?
-            .config
-            .start_minimized_to_tray
-    {
-        windows.proton_window.set_visible(false);
-    } else {
-        windows.proton_window.set_visible(true);
-    }
-
     event_loop.run(move |event, elwt, control_flow| {
         *control_flow = ControlFlow::Wait;
 
@@ -87,12 +85,15 @@ pub fn run() -> Result<()> {
                 if let Ok(state) = lock_state(&state) {
                     let _ = refresh_settings(&windows.settings, &state);
                 }
+                let _ = proxy.send_event(UserEvent::EnsureProtonWebview {
+                    show_window: show_proton_on_start,
+                });
             }
             Event::UserEvent(UserEvent::TrayMenu(menu_id)) => {
                 handle_tray_event(
                     &menu_id,
                     &tray,
-                    &windows,
+                    &mut windows,
                     &state,
                     &secrets,
                     &proxy,
@@ -100,7 +101,9 @@ pub fn run() -> Result<()> {
                 );
             }
             Event::UserEvent(user_event) => {
-                if let Err(error) = handle_user_event(user_event, &windows, &state, &secrets) {
+                if let Err(error) =
+                    handle_user_event(user_event, &mut windows, &state, &secrets, &proxy)
+                {
                     error!(?error, "user event handling failed");
                 }
             }
@@ -130,13 +133,14 @@ pub fn run() -> Result<()> {
 
 fn handle_user_event(
     event: UserEvent,
-    windows: &Windows,
+    windows: &mut Windows,
     state: &Arc<Mutex<AppState>>,
     secrets: &SecretStore,
+    proxy: &EventLoopProxy<UserEvent>,
 ) -> Result<()> {
     match event {
         UserEvent::ProtonSnapshot(snapshot) => {
-            handle_proton_snapshot(snapshot, windows, state, secrets)?;
+            handle_proton_snapshot(snapshot, windows, state, secrets, proxy)?;
         }
         UserEvent::OverlayAction(action) => match action.action.as_str() {
             "dismiss" => {
@@ -193,14 +197,10 @@ fn handle_user_event(
                     (notification, copy_enabled)
                 };
 
-                show_overlay(
-                    &windows.overlay_window,
-                    &windows.overlay,
-                    &notification,
-                    copy_enabled,
-                )?;
+                show_overlay(windows, proxy, &notification, copy_enabled)?;
             }
             "login_window" => {
+                windows.ensure_proton_ready(proxy, state)?;
                 windows.proton_window.set_visible(true);
                 windows.proton_window.set_focus();
             }
@@ -217,6 +217,13 @@ fn handle_user_event(
         UserEvent::SetSession(session_state) => {
             update_session(state.clone(), &windows.settings, session_state)?;
         }
+        UserEvent::EnsureProtonWebview { show_window } => {
+            windows.ensure_proton_ready(proxy, state)?;
+            if show_window {
+                windows.proton_window.set_visible(true);
+                windows.proton_window.set_focus();
+            }
+        }
         UserEvent::TrayMenu(_) => {}
     }
 
@@ -225,9 +232,10 @@ fn handle_user_event(
 
 fn handle_proton_snapshot(
     snapshot: ProtonSnapshot,
-    windows: &Windows,
+    windows: &mut Windows,
     state: &Arc<Mutex<AppState>>,
     secrets: &SecretStore,
+    proxy: &EventLoopProxy<UserEvent>,
 ) -> Result<()> {
     let session_state = infer_session_state(&snapshot);
     update_session(state.clone(), &windows.settings, session_state)?;
@@ -258,8 +266,8 @@ fn handle_proton_snapshot(
 
     if let Some(notification) = state_guard.register_candidate(&candidate) {
         show_overlay(
-            &windows.overlay_window,
-            &windows.overlay,
+            windows,
+            proxy,
             &notification,
             state_guard.config.copy_button_enabled,
         )?;
@@ -283,7 +291,7 @@ fn update_session(
 fn handle_tray_event(
     menu_id: &MenuId,
     tray: &AppTray,
-    windows: &Windows,
+    windows: &mut Windows,
     state: &Arc<Mutex<AppState>>,
     secrets: &SecretStore,
     proxy: &EventLoopProxy<UserEvent>,
@@ -296,6 +304,10 @@ fn handle_tray_event(
             let _ = refresh_settings(&windows.settings, &state);
         }
     } else if menu_id == tray.open_login.id() {
+        if let Err(error) = windows.ensure_proton_ready(proxy, state) {
+            warn!(?error, "failed to initialize Proton Mail window");
+            return;
+        }
         windows.proton_window.set_visible(true);
         windows.proton_window.set_focus();
     } else if menu_id == tray.pause_resume.id() {
@@ -313,6 +325,10 @@ fn handle_tray_event(
             warn!(?error, "failed to clear session marker");
         }
         let _ = proxy.send_event(UserEvent::SetSession(MailSessionState::Unauthenticated));
+        if let Err(error) = windows.ensure_proton_ready(proxy, state) {
+            warn!(?error, "failed to initialize Proton Mail window");
+            return;
+        }
         windows.proton_window.set_visible(true);
     } else if menu_id == tray.quit.id() {
         *control_flow = ControlFlow::Exit;
@@ -339,12 +355,17 @@ fn reconcile_launch_on_startup(state: &Arc<Mutex<AppState>>) -> Result<()> {
 }
 
 fn show_overlay(
-    window: &Window,
-    overlay_view: &WebView,
+    windows: &mut Windows,
+    proxy: &EventLoopProxy<UserEvent>,
     notification: &OtpNotification,
     copy_enabled: bool,
 ) -> Result<()> {
-    position_overlay(window)?;
+    windows.ensure_overlay_ready(proxy)?;
+    let overlay_view = windows
+        .overlay
+        .as_ref()
+        .context("overlay webview should be initialized")?;
+    position_overlay(&windows.overlay_window)?;
     let payload = serde_json::to_string(&OverlayPayload::from_notification(
         notification,
         copy_enabled,
@@ -353,8 +374,8 @@ fn show_overlay(
     overlay_view
         .evaluate_script(&format!("window.__PROTON2FA_OVERLAY.show({payload});"))
         .context("failed to render overlay notification")?;
-    window.set_visible(true);
-    window.set_focus();
+    windows.overlay_window.set_visible(true);
+    windows.overlay_window.set_focus();
     Ok(())
 }
 
@@ -435,6 +456,91 @@ fn build_platform_webview<'a>(
     }
 }
 
+fn build_overlay_webview(window: &Window, proxy: EventLoopProxy<UserEvent>) -> Result<WebView> {
+    with_windows_webview_background(WEBVIEW2_OVERLAY_BACKGROUND, || {
+        let webview = build_platform_webview(
+            WebViewBuilder::new()
+                .with_transparent(true)
+                .with_custom_protocol(APP_PROTOCOL.into(), |_webview_id, request| {
+                    app_protocol_response(request)
+                })
+                .with_url(OVERLAY_PAGE_URL)
+                .with_ipc_handler(move |payload: Request<String>| {
+                    let parsed = serde_json::from_str::<OverlayAction>(payload.body())
+                        .unwrap_or_else(|_| OverlayAction {
+                            action: "dismiss".to_owned(),
+                        });
+                    let _ = proxy.send_event(UserEvent::OverlayAction(parsed));
+                }),
+            window,
+        )
+        .context("failed to build overlay webview")?;
+        webview
+            .set_background_color((0, 0, 0, 0))
+            .context("failed to set overlay background color")?;
+        Ok(webview)
+    })
+}
+
+fn build_proton_webview(
+    window: &Window,
+    proxy: EventLoopProxy<UserEvent>,
+    config: &AppConfig,
+) -> Result<WebView> {
+    let monitor_script = proton_monitor_script(config.poll_interval_seconds);
+    let mut web_context = WebContext::new(Some(config.user_data_dir.clone()));
+    with_windows_webview_background(WEBVIEW2_APP_BACKGROUND, || {
+        build_platform_webview(
+            WebViewBuilder::new_with_web_context(&mut web_context)
+                .with_background_color((24, 24, 24, 255))
+                .with_url(&config.proton_mail_url)
+                .with_initialization_script(&monitor_script)
+                .with_ipc_handler(move |payload: Request<String>| {
+                    match serde_json::from_str::<ProtonIpc>(payload.body()) {
+                        Ok(ProtonIpc::Snapshot(snapshot)) => {
+                            let _ = proxy.send_event(UserEvent::ProtonSnapshot(snapshot));
+                        }
+                        Ok(ProtonIpc::DismissOverlay) => {
+                            let _ = proxy.send_event(UserEvent::DismissOverlay);
+                        }
+                        Err(error) => {
+                            let _ =
+                                proxy.send_event(UserEvent::SetSession(MailSessionState::Error));
+                            warn!(?error, "failed to parse Proton ipc payload");
+                        }
+                    }
+                }),
+            window,
+        )
+        .context("failed to build Proton webview")
+    })
+}
+
+#[cfg(windows)]
+fn with_windows_webview_background<T>(color: &str, build: impl FnOnce() -> Result<T>) -> Result<T> {
+    let previous = std::env::var_os(WEBVIEW2_DEFAULT_BACKGROUND_COLOR);
+    unsafe {
+        std::env::set_var(WEBVIEW2_DEFAULT_BACKGROUND_COLOR, color);
+    }
+    let result = build();
+    unsafe {
+        if let Some(previous) = previous {
+            std::env::set_var(WEBVIEW2_DEFAULT_BACKGROUND_COLOR, previous);
+        } else {
+            std::env::remove_var(WEBVIEW2_DEFAULT_BACKGROUND_COLOR);
+        }
+    }
+    result
+}
+
+#[cfg(not(windows))]
+fn with_windows_webview_background<T>(
+    _color: &str,
+    build: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    build()
+}
+
 trait StateView {
     fn config(&self) -> &AppConfig;
     fn session_state(&self) -> MailSessionState;
@@ -471,23 +577,19 @@ impl StateView for std::sync::MutexGuard<'_, AppState> {
 
 struct Windows {
     overlay_window: Window,
-    overlay: WebView,
+    overlay: Option<WebView>,
     settings_window: Window,
     settings: WebView,
     proton_window: Window,
-    _proton: WebView,
+    proton: Option<WebView>,
 }
 
 impl Windows {
     fn build(
         event_loop: &EventLoop<UserEvent>,
         proxy: EventLoopProxy<UserEvent>,
-        state: Arc<Mutex<AppState>>,
+        _state: Arc<Mutex<AppState>>,
     ) -> Result<Self> {
-        let config = {
-            let state = lock_state(&state)?;
-            state.config.clone()
-        };
         let app_window_icon =
             native_window_icon().context("failed to create native window icon")?;
 
@@ -505,23 +607,8 @@ impl Windows {
             .context("failed to build overlay window")?;
 
         let overlay_proxy = proxy.clone();
-        let overlay = build_platform_webview(
-            WebViewBuilder::new()
-                .with_transparent(true)
-                .with_custom_protocol(APP_PROTOCOL.into(), |_webview_id, request| {
-                    app_protocol_response(request)
-                })
-                .with_url(OVERLAY_PAGE_URL)
-                .with_ipc_handler(move |payload: Request<String>| {
-                    let parsed = serde_json::from_str::<OverlayAction>(payload.body())
-                        .unwrap_or_else(|_| OverlayAction {
-                            action: "dismiss".to_owned(),
-                        });
-                    let _ = overlay_proxy.send_event(UserEvent::OverlayAction(parsed));
-                }),
-            &overlay_window,
-        )
-        .context("failed to build overlay webview")?;
+        let overlay = build_overlay_webview(&overlay_window, overlay_proxy)
+            .context("failed to build overlay webview")?;
 
         let settings_window = WindowBuilder::new()
             .with_title(SETTINGS_HTML_TITLE)
@@ -533,63 +620,68 @@ impl Windows {
             .context("failed to build settings window")?;
 
         let settings_proxy = proxy.clone();
-        let settings = build_platform_webview(
-            WebViewBuilder::new()
-                .with_custom_protocol(APP_PROTOCOL.into(), |_webview_id, request| {
-                    app_protocol_response(request)
-                })
-                .with_url(SETTINGS_PAGE_URL)
-                .with_ipc_handler(move |payload: Request<String>| {
-                    if let Ok(parsed) = serde_json::from_str::<SettingsAction>(payload.body()) {
-                        let _ = settings_proxy.send_event(UserEvent::SettingsAction(parsed));
-                    }
-                }),
-            &settings_window,
-        )
-        .context("failed to build settings webview")?;
+        let settings = with_windows_webview_background(WEBVIEW2_APP_BACKGROUND, || {
+            build_platform_webview(
+                WebViewBuilder::new()
+                    .with_background_color((24, 24, 24, 255))
+                    .with_custom_protocol(APP_PROTOCOL.into(), |_webview_id, request| {
+                        app_protocol_response(request)
+                    })
+                    .with_url(SETTINGS_PAGE_URL)
+                    .with_ipc_handler(move |payload: Request<String>| {
+                        if let Ok(parsed) = serde_json::from_str::<SettingsAction>(payload.body()) {
+                            let _ = settings_proxy.send_event(UserEvent::SettingsAction(parsed));
+                        }
+                    }),
+                &settings_window,
+            )
+            .context("failed to build settings webview")
+        })?;
 
         let proton_window = WindowBuilder::new()
             .with_title(PROTON_LOGIN_TITLE)
-            .with_visible(true)
+            .with_visible(false)
             .with_window_icon(Some(app_window_icon))
             .with_inner_size(LogicalSize::new(1120.0, 820.0))
             .build(event_loop)
             .context("failed to build Proton login window")?;
 
-        let proton_proxy = proxy;
-        let monitor_script = proton_monitor_script(config.poll_interval_seconds);
-        let mut web_context = WebContext::new(Some(config.user_data_dir.clone()));
-        let proton = build_platform_webview(
-            WebViewBuilder::new_with_web_context(&mut web_context)
-                .with_url(&config.proton_mail_url)
-                .with_initialization_script(&monitor_script)
-                .with_ipc_handler(move |payload: Request<String>| {
-                    match serde_json::from_str::<ProtonIpc>(payload.body()) {
-                        Ok(ProtonIpc::Snapshot(snapshot)) => {
-                            let _ = proton_proxy.send_event(UserEvent::ProtonSnapshot(snapshot));
-                        }
-                        Ok(ProtonIpc::DismissOverlay) => {
-                            let _ = proton_proxy.send_event(UserEvent::DismissOverlay);
-                        }
-                        Err(error) => {
-                            let _ = proton_proxy
-                                .send_event(UserEvent::SetSession(MailSessionState::Error));
-                            warn!(?error, "failed to parse Proton ipc payload");
-                        }
-                    }
-                }),
-            &proton_window,
-        )
-        .context("failed to build Proton webview")?;
-
         Ok(Self {
             overlay_window,
-            overlay,
+            overlay: Some(overlay),
             settings_window,
             settings,
             proton_window,
-            _proton: proton,
+            proton: None,
         })
+    }
+
+    fn ensure_overlay_ready(&mut self, proxy: &EventLoopProxy<UserEvent>) -> Result<()> {
+        if self.overlay.is_none() {
+            let overlay = build_overlay_webview(&self.overlay_window, proxy.clone())
+                .context("failed to lazily build overlay webview")?;
+            self.overlay = Some(overlay);
+        }
+        Ok(())
+    }
+
+    fn ensure_proton_ready(
+        &mut self,
+        proxy: &EventLoopProxy<UserEvent>,
+        state: &Arc<Mutex<AppState>>,
+    ) -> Result<()> {
+        if self.proton.is_some() {
+            return Ok(());
+        }
+
+        let config = {
+            let state = lock_state(state)?;
+            state.config.clone()
+        };
+        let proton = build_proton_webview(&self.proton_window, proxy.clone(), &config)
+            .context("failed to build Proton webview")?;
+        self.proton = Some(proton);
+        Ok(())
     }
 }
 
@@ -646,6 +738,7 @@ enum UserEvent {
     ProtonSnapshot(ProtonSnapshot),
     OverlayAction(OverlayAction),
     SettingsAction(SettingsAction),
+    EnsureProtonWebview { show_window: bool },
     TrayMenu(MenuId),
     DismissOverlay,
     SetSession(MailSessionState),
@@ -842,7 +935,6 @@ fn proton_monitor_script(poll_interval_seconds: u64) -> String {
 
 fn overlay_html() -> String {
     let app_icon_url = app_icon_data_url();
-    let app_version = format!("v{}", env!("CARGO_PKG_VERSION"));
     let mut html = String::from(
         r#"<!doctype html>
 <html>
@@ -876,6 +968,7 @@ fn overlay_html() -> String {
         background: rgba(0, 0, 0, 0) !important;
         overflow: hidden;
         font-family: var(--font);
+        overscroll-behavior: none;
       }
       .shell {
         width: 100%;
@@ -883,13 +976,13 @@ fn overlay_html() -> String {
         display: flex;
         align-items: stretch;
         justify-content: stretch;
-        padding: 12px;
+        padding: 10px;
         background: transparent;
       }
       .card {
         width: 100%;
         height: 100%;
-        padding: 16px;
+        padding: 18px 18px 16px;
         border-radius: 22px;
         border: 1px solid var(--border);
         background: var(--panel);
@@ -897,8 +990,23 @@ fn overlay_html() -> String {
         box-shadow: 0 24px 60px rgba(0, 0, 0, 0.42), inset 0 1px 0 rgba(255, 255, 255, 0.04);
         display: flex;
         flex-direction: column;
-        gap: 12px;
+        gap: 14px;
+        opacity: 0;
+        transform: translateY(12px) scale(0.985);
         overflow: hidden;
+      }
+      .card.is-visible {
+        animation: overlay-enter 180ms cubic-bezier(0.22, 1, 0.36, 1) both;
+      }
+      @keyframes overlay-enter {
+        from {
+          opacity: 0;
+          transform: translateY(12px) scale(0.985);
+        }
+        to {
+          opacity: 1;
+          transform: translateY(0) scale(1);
+        }
       }
       .brand-row {
         display: flex;
@@ -946,19 +1054,21 @@ fn overlay_html() -> String {
         color: #ffffff;
         font-size: 16px;
         font-weight: 400;
-        line-height: 1.35;
+        line-height: 1.4;
         display: -webkit-box;
         overflow: hidden;
         text-overflow: ellipsis;
         -webkit-box-orient: vertical;
-        -webkit-line-clamp: 2;
+        -webkit-line-clamp: 3;
+        min-height: 2.8em;
+        overflow-wrap: anywhere;
       }
       .code-row {
         display: grid;
         grid-template-columns: minmax(0, 1fr) auto;
         align-items: stretch;
         gap: 10px;
-        min-height: 56px;
+        min-height: 58px;
       }
       .code {
         min-width: 0;
@@ -1027,7 +1137,7 @@ fn overlay_html() -> String {
         color: var(--muted);
         font-size: 12px;
         line-height: 1.4;
-        min-height: 18px;
+        min-height: 22px;
       }
       .meta strong {
         color: #ffffff;
@@ -1127,6 +1237,7 @@ fn overlay_html() -> String {
       }
 
       function hide() {
+        card.classList.remove("is-visible");
         card.hidden = true;
         state.revealed = false;
         renderCode();
@@ -1145,6 +1256,11 @@ fn overlay_html() -> String {
           state.revealed = false;
           renderCode();
           card.hidden = false;
+          card.classList.remove("is-visible");
+          void card.offsetWidth;
+          window.requestAnimationFrame(() => {
+            card.classList.add("is-visible");
+          });
           window.clearTimeout(state.hideTimer);
           state.hideTimer = window.setTimeout(() => {
             window.ipc.postMessage(JSON.stringify({ action: "dismiss" }));
@@ -1159,7 +1275,6 @@ fn overlay_html() -> String {
     );
 
     html.replace("__APP_ICON__", &app_icon_url)
-        .replace("__APP_VERSION__", &app_version)
 }
 
 fn settings_html() -> String {
@@ -1212,11 +1327,122 @@ fn settings_html() -> String {
         display: none !important;
       }
       main {
+        position: relative;
         width: 100%;
         max-width: 760px;
+        min-height: 560px;
         display: flex;
         flex-direction: column;
         gap: 72px;
+      }
+      .boot-skeleton {
+        position: absolute;
+        inset: 0;
+        display: grid;
+        align-content: start;
+        gap: 36px;
+        padding: 0;
+        background: var(--bg);
+        pointer-events: none;
+        transition: opacity 180ms ease, visibility 0ms linear 180ms;
+      }
+      body:not(.loading) .boot-skeleton {
+        opacity: 0;
+        visibility: hidden;
+      }
+      .skeleton-header,
+      .skeleton-grid,
+      .skeleton-footer {
+        display: grid;
+      }
+      .skeleton-header {
+        gap: 16px;
+      }
+      .skeleton-grid {
+        grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+        column-gap: 80px;
+        row-gap: 64px;
+      }
+      .skeleton-footer {
+        grid-template-columns: 140px 120px 1fr 110px;
+        align-items: center;
+        gap: 16px;
+        padding-top: 40px;
+        border-top: 1px solid rgba(30, 33, 40, 0.5);
+      }
+      .skeleton-block,
+      .skeleton-pill,
+      .skeleton-line {
+        background: linear-gradient(90deg, rgba(255, 255, 255, 0.04), rgba(255, 255, 255, 0.09), rgba(255, 255, 255, 0.04));
+        background-size: 220% 100%;
+        animation: skeleton-shimmer 1.1s linear infinite;
+      }
+      .skeleton-block {
+        border-radius: 20px;
+      }
+      .skeleton-line {
+        height: 12px;
+        border-radius: 999px;
+      }
+      .skeleton-pill {
+        height: 38px;
+        border-radius: 999px;
+      }
+      .skeleton-brand {
+        width: 168px;
+        height: 28px;
+      }
+      .skeleton-state {
+        width: 138px;
+      }
+      .skeleton-version {
+        width: 52px;
+        height: 12px;
+        justify-self: end;
+      }
+      .skeleton-metric {
+        display: grid;
+        gap: 18px;
+      }
+      .skeleton-label {
+        width: 72px;
+      }
+      .skeleton-value {
+        width: 168px;
+        height: 62px;
+      }
+      .skeleton-toggle-group {
+        display: grid;
+        gap: 28px;
+      }
+      .skeleton-toggle-row,
+      .skeleton-last-code {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 20px;
+      }
+      .skeleton-toggle-label {
+        width: 128px;
+      }
+      .skeleton-switch {
+        width: 40px;
+        height: 24px;
+        border-radius: 999px;
+      }
+      .skeleton-code-label {
+        width: 76px;
+      }
+      .skeleton-code {
+        width: 132px;
+      }
+      @keyframes skeleton-shimmer {
+        from {
+          background-position: 200% 0;
+        }
+        to {
+          background-position: -20% 0;
+        }
       }
       header {
         display: flex;
@@ -1477,15 +1703,15 @@ fn settings_html() -> String {
       }
     </style>
   </head>
-  <body>
-    <main>
+  <body class="loading">
+    <main id="app-shell">
       <header>
         <div>
           <h1>
             <img class="brand-mark" src="" alt="ProtonCode icon" id="brand-mark" />
             <span>ProtonCode</span>
           </h1>
-          <p class="session-state" id="session-state">Monitoring active</p>
+          <p class="session-state" id="session-state">Starting Proton Mail...</p>
         </div>
         <div class="version">__APP_VERSION__</div>
       </header>
@@ -1543,9 +1769,46 @@ fn settings_html() -> String {
         </button>
       </footer>
 
+      <div class="boot-skeleton" aria-hidden="true">
+        <div class="skeleton-header">
+          <div class="skeleton-line skeleton-brand"></div>
+          <div class="skeleton-line skeleton-state"></div>
+          <div class="skeleton-line skeleton-version"></div>
+        </div>
+        <div class="skeleton-grid">
+          <div class="skeleton-metric">
+            <div class="skeleton-line skeleton-label"></div>
+            <div class="skeleton-block skeleton-value"></div>
+            <div class="skeleton-line skeleton-label"></div>
+            <div class="skeleton-block skeleton-value"></div>
+          </div>
+          <div class="skeleton-toggle-group">
+            <div class="skeleton-toggle-row">
+              <div class="skeleton-line skeleton-toggle-label"></div>
+              <div class="skeleton-block skeleton-switch"></div>
+            </div>
+            <div class="skeleton-toggle-row">
+              <div class="skeleton-line skeleton-toggle-label"></div>
+              <div class="skeleton-block skeleton-switch"></div>
+            </div>
+            <div class="skeleton-last-code">
+              <div class="skeleton-line skeleton-code-label"></div>
+              <div class="skeleton-line skeleton-code"></div>
+            </div>
+          </div>
+        </div>
+        <div class="skeleton-footer">
+          <div class="skeleton-pill"></div>
+          <div class="skeleton-pill"></div>
+          <div></div>
+          <div class="skeleton-pill"></div>
+        </div>
+      </div>
+
     </main>
     <script>
       document.getElementById("brand-mark").src = "__APP_ICON__";
+      const appShell = document.getElementById("app-shell");
 
       const elements = {
         sessionState: document.getElementById("session-state"),
@@ -1622,6 +1885,8 @@ fn settings_html() -> String {
       window.__PROTON2FA_STATUS = {
         render(payload) {
           const hasCode = Boolean(payload.last_masked_code);
+          document.body.classList.remove("loading");
+          appShell.dataset.ready = "true";
           elements.sessionState.textContent = payload.session_state;
           elements.lastCode.textContent = payload.last_masked_code || "No code received yet";
           elements.lastCode.classList.toggle("empty", !hasCode);

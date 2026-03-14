@@ -29,7 +29,7 @@ url = "2.5.7"
 [target.'cfg(any(windows, target_os = "linux"))'.dependencies]
 tao = "0.34.6"
 tray-icon = "0.21.3"
-wry = "0.54.2"
+wry = { version = "0.54.2", features = ["transparent"] }
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.55.0"

@@ -9,6 +9,11 @@ fn main() -> Result<()> {
         .compact()
         .init();
 
+    #[cfg(windows)]
+    unsafe {
+        std::env::set_var("WEBVIEW2_DEFAULT_BACKGROUND_COLOR", "FF181818");
+    }
+
     #[cfg(any(windows, target_os = "linux"))]
     {
         protoncode::desktop_app::run()
