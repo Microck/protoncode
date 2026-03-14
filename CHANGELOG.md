@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.7](https://github.com/Microck/protoncode/compare/v0.2.6...v0.2.7) (2026-03-14)
+
+
+### Bug Fixes
+
+* **app:** improve startup and all-mail otp detection ([5597663](https://github.com/Microck/protoncode/commit/5597663dcf4917a5a777af2fc616c357240e3c31))
+
 ## [0.2.6](https://github.com/Microck/protoncode/compare/v0.2.5...v0.2.6) (2026-03-14)
 
 
