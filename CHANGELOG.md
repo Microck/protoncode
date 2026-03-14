@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.3](https://github.com/Microck/protoncode/compare/v0.2.2...v0.2.3) (2026-03-14)
+
+
+### Bug Fixes
+
+* **ui:** correct overlay and control states ([3160e6f](https://github.com/Microck/protoncode/commit/3160e6fdb28e26f2729ea28a6fa448cbe9e5abdd))
+
 ## [0.2.2](https://github.com/Microck/protoncode/compare/v0.2.1...v0.2.2) (2026-03-14)
 
 
