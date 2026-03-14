@@ -1,6 +1,6 @@
 [package]
 name = "protoncode"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2024"
 authors = ["Microck <contact@micr.dev>"]
 description = "desktop tray app for masked proton mail otp notifications"
