@@ -11,16 +11,14 @@ use crate::models::{MailSessionState, OtpCandidateEmail, OtpNotification};
 use crate::otp::detect_otp;
 
 const RECENT_CACHE_LIMIT: usize = 128;
-const DEBUG_LOG_LIMIT: usize = 80;
-
 #[derive(Debug, Clone)]
 pub struct AppState {
     pub config: AppConfig,
     pub session_state: MailSessionState,
     pub current_notification: Option<OtpNotification>,
+    last_notification: Option<OtpNotification>,
     recent_message_ids: HashSet<String>,
     recent_message_order: VecDeque<String>,
-    debug_log_entries: VecDeque<String>,
     seen_cache_path: PathBuf,
 }
 
@@ -36,16 +34,15 @@ impl AppState {
 
         let (recent_message_ids, recent_message_order) =
             load_seen_cache(&seen_cache_path).unwrap_or_default();
-        let mut state = Self {
+        let state = Self {
             config,
             session_state: MailSessionState::Unauthenticated,
             current_notification: None,
+            last_notification: None,
             recent_message_ids,
             recent_message_order,
-            debug_log_entries: VecDeque::new(),
             seen_cache_path,
         };
-        state.push_debug_log("Application started");
         Ok(state)
     }
 
@@ -70,6 +67,7 @@ impl AppState {
 
         self.track_message(email.message_id.clone());
         self.current_notification = Some(notification.clone());
+        self.last_notification = Some(notification.clone());
         Some(notification)
     }
 
@@ -87,27 +85,12 @@ impl AppState {
             .map(|notification| notification.raw_code.as_str())
     }
 
+    pub fn last_notification(&self) -> Option<&OtpNotification> {
+        self.last_notification.as_ref()
+    }
+
     pub fn has_seen_message(&self, message_id: &str) -> bool {
         self.recent_message_ids.contains(message_id)
-    }
-
-    pub fn push_debug_log(&mut self, message: impl Into<String>) {
-        let now = OffsetDateTime::now_utc();
-        let entry = format!(
-            "{:02}:{:02}:{:02} {}",
-            now.hour(),
-            now.minute(),
-            now.second(),
-            message.into()
-        );
-        self.debug_log_entries.push_front(entry);
-        while self.debug_log_entries.len() > DEBUG_LOG_LIMIT {
-            self.debug_log_entries.pop_back();
-        }
-    }
-
-    pub fn debug_logs(&self) -> Vec<String> {
-        self.debug_log_entries.iter().cloned().collect()
     }
 
     fn track_message(&mut self, message_id: String) {
@@ -184,5 +167,30 @@ mod tests {
 
         assert!(state.register_candidate(&email).is_some());
         assert!(state.register_candidate(&email).is_none());
+    }
+
+    #[test]
+    fn clear_notification_keeps_last_received_code() {
+        let mut state = AppState::from_config(test_config()).unwrap();
+        let email = OtpCandidateEmail {
+            message_id: "message-1".to_owned(),
+            sender: Some("Example".to_owned()),
+            subject: Some("Code".to_owned()),
+            received_at: OffsetDateTime::UNIX_EPOCH,
+            body_text: "Your verification code is 123456.".to_owned(),
+        };
+
+        let notification = state
+            .register_candidate(&email)
+            .expect("otp notification should be created");
+        state.clear_notification();
+
+        assert!(state.current_notification.is_none());
+        assert_eq!(
+            state
+                .last_notification()
+                .map(|last| last.masked_code.as_str()),
+            Some(notification.masked_code.as_str())
+        );
     }
 }

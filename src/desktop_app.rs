@@ -37,7 +37,7 @@ const SETTINGS_HTML_TITLE: &str = "ProtonCode";
 const PROTON_LOGIN_TITLE: &str = "Proton Mail - ProtonCode";
 const OVERLAY_WINDOW_TITLE: &str = "ProtonCode Notification";
 const OVERLAY_WIDTH: f64 = 420.0;
-const OVERLAY_HEIGHT: f64 = 222.0;
+const OVERLAY_HEIGHT: f64 = 248.0;
 const APP_PROTOCOL: &str = "protoncode";
 const OVERLAY_PAGE_URL: &str = "protoncode://app/overlay.html";
 const SETTINGS_PAGE_URL: &str = "protoncode://app/settings.html";
@@ -176,14 +176,6 @@ fn handle_user_event(
                 autostart::sync_launch_on_startup(launch_on_startup)?;
                 state.config.launch_on_startup = launch_on_startup;
                 state.save_config()?;
-                let poll_interval = state.config.poll_interval_seconds;
-                let notification_duration = state.config.notification_duration_seconds;
-                let copy_enabled = state.config.copy_button_enabled;
-                let launch_on_startup = state.config.launch_on_startup;
-                state.push_debug_log(format!(
-                    "Config saved: interval={}s, duration={}s, copy={}, autostart={}",
-                    poll_interval, notification_duration, copy_enabled, launch_on_startup
-                ));
                 refresh_settings(&windows.settings, &state)?;
             }
             "test_notification" => {
@@ -197,7 +189,6 @@ fn handle_user_event(
                     );
                     let copy_enabled = state.config.copy_button_enabled;
                     state.current_notification = Some(notification.clone());
-                    state.push_debug_log("Debug notification triggered");
                     refresh_settings(&windows.settings, &state)?;
                     (notification, copy_enabled)
                 };
@@ -265,23 +256,13 @@ fn handle_proton_snapshot(
         body_text: snapshot.text,
     };
 
-    let was_seen = state_guard.has_seen_message(&candidate.message_id);
     if let Some(notification) = state_guard.register_candidate(&candidate) {
-        state_guard.push_debug_log(format!(
-            "OTP matched from {} -> {}",
-            notification.source_label, notification.masked_code
-        ));
         show_overlay(
             &windows.overlay_window,
             &windows.overlay,
             &notification,
             state_guard.config.copy_button_enabled,
         )?;
-    } else if !was_seen && snapshot_has_otp_signal(&candidate.body_text) {
-        state_guard.push_debug_log(format!(
-            "Snapshot captured but no OTP matched: {}",
-            truncate_debug_title(&snapshot.title)
-        ));
     }
 
     refresh_settings(&windows.settings, &state_guard)?;
@@ -294,9 +275,7 @@ fn update_session(
     session_state: MailSessionState,
 ) -> Result<()> {
     let mut state = lock_state(&state)?;
-    if state.set_session_state(session_state) {
-        state.push_debug_log(format!("Session -> {}", session_state_label(session_state)));
-    }
+    state.set_session_state(session_state);
     refresh_settings(settings, &state)?;
     Ok(())
 }
@@ -420,40 +399,6 @@ fn session_state_label(state: MailSessionState) -> &'static str {
     }
 }
 
-fn snapshot_has_otp_signal(text: &str) -> bool {
-    let lowered = text.to_lowercase();
-    let has_context = [
-        "code",
-        "verification",
-        "2fa",
-        "two-factor",
-        "two factor",
-        "otp",
-        "security",
-        "passcode",
-    ]
-    .iter()
-    .any(|term| lowered.contains(term));
-    let has_digits = text
-        .chars()
-        .filter(|ch| ch.is_ascii_digit())
-        .take(4)
-        .count()
-        >= 4;
-    has_context || has_digits
-}
-
-fn truncate_debug_title(title: &str) -> String {
-    const LIMIT: usize = 72;
-    let trimmed = title.trim();
-    if trimmed.chars().count() <= LIMIT {
-        return trimmed.to_owned();
-    }
-
-    let shortened: String = trimmed.chars().take(LIMIT - 1).collect();
-    format!("{shortened}…")
-}
-
 fn fingerprint_snapshot(snapshot: &ProtonSnapshot) -> String {
     let mut hasher = DefaultHasher::new();
     snapshot.url.hash(&mut hasher);
@@ -493,8 +438,7 @@ fn build_platform_webview<'a>(
 trait StateView {
     fn config(&self) -> &AppConfig;
     fn session_state(&self) -> MailSessionState;
-    fn current_notification(&self) -> Option<&OtpNotification>;
-    fn debug_logs(&self) -> Vec<String>;
+    fn last_notification(&self) -> Option<&OtpNotification>;
 }
 
 impl StateView for AppState {
@@ -506,12 +450,8 @@ impl StateView for AppState {
         self.session_state
     }
 
-    fn current_notification(&self) -> Option<&OtpNotification> {
-        self.current_notification.as_ref()
-    }
-
-    fn debug_logs(&self) -> Vec<String> {
-        AppState::debug_logs(self)
+    fn last_notification(&self) -> Option<&OtpNotification> {
+        AppState::last_notification(self)
     }
 }
 
@@ -524,12 +464,8 @@ impl StateView for std::sync::MutexGuard<'_, AppState> {
         self.session_state
     }
 
-    fn current_notification(&self) -> Option<&OtpNotification> {
-        self.current_notification.as_ref()
-    }
-
-    fn debug_logs(&self) -> Vec<String> {
-        AppState::debug_logs(&*self)
+    fn last_notification(&self) -> Option<&OtpNotification> {
+        AppState::last_notification(&*self)
     }
 }
 
@@ -782,7 +718,6 @@ struct SettingsSnapshot {
     copy_button_enabled: bool,
     launch_on_startup: bool,
     last_masked_code: Option<String>,
-    debug_logs: Vec<String>,
 }
 
 impl SettingsSnapshot {
@@ -799,9 +734,8 @@ impl SettingsSnapshot {
             copy_button_enabled: state.config().copy_button_enabled,
             launch_on_startup: state.config().launch_on_startup,
             last_masked_code: state
-                .current_notification()
+                .last_notification()
                 .map(|notification| notification.masked_code.clone()),
-            debug_logs: state.debug_logs(),
         }
     }
 }
@@ -924,9 +858,9 @@ fn overlay_html() -> String {
       :root {
         color-scheme: dark;
         --bg: #181818;
-        --panel: rgba(15, 17, 21, 0.98);
-        --surface: rgba(255, 255, 255, 0.03);
-        --border: #343434;
+        --panel: rgba(24, 24, 24, 0.94);
+        --surface: rgba(255, 255, 255, 0.04);
+        --border: rgba(139, 92, 246, 0.2);
         --text: #e2e8f0;
         --muted: #64748b;
         --accent: #8b5cf6;
@@ -939,12 +873,9 @@ fn overlay_html() -> String {
         margin: 0;
         width: 100%;
         height: 100%;
-        background: transparent;
+        background: rgba(0, 0, 0, 0) !important;
         overflow: hidden;
         font-family: var(--font);
-      }
-      body {
-        padding: 14px;
       }
       .shell {
         width: 100%;
@@ -952,16 +883,22 @@ fn overlay_html() -> String {
         display: flex;
         align-items: stretch;
         justify-content: stretch;
+        padding: 12px;
+        background: transparent;
       }
       .card {
         width: 100%;
-        min-height: 100%;
-        padding: 16px 16px 14px;
+        height: 100%;
+        padding: 16px;
         border-radius: 22px;
         border: 1px solid var(--border);
         background: var(--panel);
         color: var(--text);
-        display: none;
+        box-shadow: 0 24px 60px rgba(0, 0, 0, 0.42), inset 0 1px 0 rgba(255, 255, 255, 0.04);
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+        overflow: hidden;
       }
       .brand-row {
         display: flex;
@@ -995,107 +932,143 @@ fn overlay_html() -> String {
         border-bottom: 1px solid var(--border);
         padding-bottom: 4px;
       }
+      .dismiss {
+        width: 32px;
+        height: 32px;
+        min-width: 32px;
+      }
       .headline {
-        margin-top: 12px;
         color: var(--muted);
         font-size: 13px;
+        letter-spacing: 0.02em;
       }
       .source {
-        margin-top: 4px;
         color: #ffffff;
         font-size: 16px;
         font-weight: 400;
         line-height: 1.35;
+        display: -webkit-box;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        -webkit-box-orient: vertical;
+        -webkit-line-clamp: 2;
       }
       .code-row {
-        margin-top: 14px;
-        display: flex;
-        align-items: center;
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        align-items: stretch;
         gap: 10px;
+        min-height: 56px;
       }
       .code {
-        flex: 1;
-        padding: 13px 16px;
+        min-width: 0;
+        padding: 0 16px;
         border-radius: 16px;
         border: 1px solid var(--border);
         background: var(--surface);
         color: #ffffff;
+        display: flex;
+        align-items: center;
+        justify-content: center;
         font-size: 28px;
         font-weight: 400;
         letter-spacing: 0.2em;
         text-align: center;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      .code-actions {
+        display: flex;
+        align-items: center;
+        gap: 8px;
       }
       button {
         appearance: none;
-        border: 1px solid transparent;
+        border: 1px solid rgba(255, 255, 255, 0.08);
         border-radius: 999px;
-        padding: 10px 16px;
-        min-width: 88px;
-        background: transparent;
+        padding: 10px 14px;
+        min-width: 0;
+        background: rgba(255, 255, 255, 0.04);
         color: var(--muted);
         font-family: var(--font);
         font-size: 12px;
         font-weight: 400;
         cursor: pointer;
+        transition: color 0.2s ease, border-color 0.2s ease, background 0.2s ease;
       }
       button:hover {
         color: #ffffff;
+        border-color: rgba(139, 92, 246, 0.4);
+        background: rgba(139, 92, 246, 0.12);
       }
-      .toggle {
-        min-width: 84px;
+      .icon-button {
+        width: 44px;
+        height: 44px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        padding: 0;
+        flex-shrink: 0;
+      }
+      .icon-button svg {
+        width: 17px;
+        height: 17px;
+        stroke: currentColor;
+        stroke-width: 1.8;
+        fill: none;
+        stroke-linecap: round;
+        stroke-linejoin: round;
       }
       .meta {
-        margin-top: 12px;
-        display: flex;
-        justify-content: space-between;
-        gap: 12px;
-        color: var(--muted);
-        font-size: 12px;
-      }
-      .actions {
-        margin-top: 14px;
         display: flex;
         align-items: center;
-        gap: 10px;
+        gap: 8px;
+        color: var(--muted);
+        font-size: 12px;
+        line-height: 1.4;
+        min-height: 18px;
       }
-      .primary {
-        padding: 10px 18px;
-        border-color: rgba(255, 255, 255, 0.1);
-        background: rgba(255, 255, 255, 0.05);
+      .meta strong {
         color: #ffffff;
+        font-weight: 500;
       }
-      .primary:hover {
-        background: rgba(255, 255, 255, 0.1);
-      }
-      .spacer {
-        flex: 1;
+      [hidden] {
+        display: none !important;
       }
     </style>
   </head>
   <body>
     <div class="shell">
-      <div class="card" id="card">
+      <div class="card" id="card" hidden>
         <div class="brand-row">
           <div class="brand">
             <img class="brand-mark" src="" alt="ProtonCode icon" id="brand-mark" />
             <div class="brand-label">ProtonCode</div>
           </div>
-          <div class="version">__APP_VERSION__</div>
+          <button class="dismiss icon-button" id="dismiss" type="button" aria-label="Dismiss notification" title="Dismiss">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M6 6L18 18"></path>
+              <path d="M18 6L6 18"></path>
+            </svg>
+          </button>
         </div>
-        <div class="headline" id="received-at">New notification</div>
+        <div class="headline" id="received-at">Received now</div>
         <div class="source" id="source">Waiting for the next code</div>
         <div class="code-row">
           <div class="code" id="code">******</div>
-          <button class="toggle" id="toggle" type="button">Reveal</button>
+          <div class="code-actions">
+            <button class="icon-button" id="toggle" type="button" aria-label="Reveal code" title="Reveal code"></button>
+            <button class="icon-button" id="copy" type="button" aria-label="Copy code" title="Copy code">
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <rect x="9" y="9" width="10" height="10" rx="2"></rect>
+                <path d="M7 15H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h7a2 2 0 0 1 2 2v1"></path>
+              </svg>
+            </button>
+          </div>
         </div>
-        <div class="meta">
-          <span>Codes stay masked until you reveal them.</span>
-          <span>Copied only on request.</span>
-        </div>
-        <div class="actions">
-          <button id="dismiss" type="button">Dismiss</button>
-          <div class="spacer"></div>
-          <button class="primary" id="copy" type="button">Copy Code</button>
+        <div class="meta" id="meta">
+          <span>Masked by default. Copy stays manual.</span>
         </div>
       </div>
     </div>
@@ -1106,8 +1079,22 @@ fn overlay_html() -> String {
         revealed: false,
         hideTimer: null,
       };
+      const eyeIcon = `
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M2 12s3.5-6 10-6 10 6 10 6-3.5 6-10 6S2 12 2 12Z"></path>
+          <circle cx="12" cy="12" r="3"></circle>
+        </svg>`;
+      const eyeSlashIcon = `
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M3 3l18 18"></path>
+          <path d="M10.6 10.7a2 2 0 0 0 2.7 2.7"></path>
+          <path d="M9.4 5.6A11.5 11.5 0 0 1 12 5.3c6.5 0 10 6.7 10 6.7a17.6 17.6 0 0 1-4.3 4.8"></path>
+          <path d="M6.2 6.2A17.3 17.3 0 0 0 2 12s3.5 6.7 10 6.7c1 0 2-.2 2.9-.5"></path>
+        </svg>`;
 
       document.getElementById("brand-mark").src = "__APP_ICON__";
+      document.documentElement.style.background = "transparent";
+      document.body.style.background = "transparent";
 
       const card = document.getElementById("card");
       const code = document.getElementById("code");
@@ -1115,6 +1102,7 @@ fn overlay_html() -> String {
       const receivedAt = document.getElementById("received-at");
       const copy = document.getElementById("copy");
       const toggle = document.getElementById("toggle");
+      const meta = document.getElementById("meta");
 
       toggle.addEventListener("click", () => {
         state.revealed = !state.revealed;
@@ -1133,11 +1121,13 @@ fn overlay_html() -> String {
       function renderCode() {
         const isRevealed = state.revealed;
         code.textContent = isRevealed ? state.rawCode : state.maskedCode;
-        toggle.textContent = isRevealed ? "Hide" : "Reveal";
+        toggle.innerHTML = isRevealed ? eyeSlashIcon : eyeIcon;
+        toggle.setAttribute("aria-label", isRevealed ? "Hide code" : "Reveal code");
+        toggle.title = isRevealed ? "Hide code" : "Reveal code";
       }
 
       function hide() {
-        card.style.display = "none";
+        card.hidden = true;
         state.revealed = false;
         renderCode();
       }
@@ -1147,11 +1137,14 @@ fn overlay_html() -> String {
           source.textContent = payload.source_label;
           state.maskedCode = payload.masked_code;
           state.rawCode = payload.raw_code;
-          receivedAt.textContent = payload.received_at_label;
-          copy.style.display = payload.copy_enabled ? "inline-flex" : "none";
+          receivedAt.textContent = payload.received_at_label ? `Received ${payload.received_at_label}` : "Received now";
+          meta.innerHTML = payload.copy_enabled
+            ? "<span>Masked by default. <strong>Copy stays manual.</strong></span>"
+            : "<span>Masked by default. Copy is currently disabled.</span>";
+          copy.hidden = !payload.copy_enabled;
           state.revealed = false;
           renderCode();
-          card.style.display = "block";
+          card.hidden = false;
           window.clearTimeout(state.hideTimer);
           state.hideTimer = window.setTimeout(() => {
             window.ipc.postMessage(JSON.stringify({ action: "dismiss" }));
@@ -1340,35 +1333,50 @@ fn settings_html() -> String {
       }
       .toggle-input {
         position: absolute;
+        inset: 0;
+        margin: 0;
         opacity: 0;
-        pointer-events: none;
+        cursor: pointer;
+      }
+      .toggle-control {
+        position: relative;
+        display: inline-flex;
+        align-items: center;
+        width: 40px;
+        height: 24px;
+        flex-shrink: 0;
       }
       .toggle-switch {
-        width: 32px;
-        height: 18px;
-        flex-shrink: 0;
+        width: 40px;
+        height: 24px;
+        display: inline-block;
         position: relative;
         border-radius: 999px;
-        background: #2b2b2b;
-        box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.06);
-        transition: background 0.2s ease;
+        background: #2d2d34;
+        border: 1px solid rgba(255, 255, 255, 0.14);
+        box-shadow: inset 0 1px 1px rgba(255, 255, 255, 0.04);
+        pointer-events: none;
+        transition: background 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease;
       }
       .toggle-switch::after {
         content: "";
         position: absolute;
         top: 3px;
         left: 3px;
-        width: 12px;
-        height: 12px;
+        width: 16px;
+        height: 16px;
         border-radius: 50%;
-        background: #c1cad7;
-        transition: all 0.2s ease;
+        background: #d5dce7;
+        box-shadow: 0 1px 2px rgba(0, 0, 0, 0.25);
+        transition: transform 0.2s ease, background 0.2s ease;
       }
-      .toggle-input:checked + .toggle-switch {
+      .toggle-switch.is-on {
         background: var(--accent);
+        border-color: rgba(139, 92, 246, 0.7);
+        box-shadow: 0 0 0 1px rgba(139, 92, 246, 0.12), 0 8px 18px rgba(91, 33, 182, 0.18);
       }
-      .toggle-input:checked + .toggle-switch::after {
-        left: 17px;
+      .toggle-switch.is-on::after {
+        transform: translateX(16px);
         background: #ffffff;
       }
       .last-code {
@@ -1438,39 +1446,6 @@ fn settings_html() -> String {
         font-size: 14px;
         line-height: 1;
       }
-      .debug-panel {
-        display: grid;
-        gap: 10px;
-        padding-top: 8px;
-        border-top: 1px solid rgba(30, 33, 40, 0.5);
-      }
-      .debug-header {
-        color: var(--muted);
-        font-size: 11px;
-        font-weight: 500;
-        letter-spacing: 0.16em;
-        text-transform: uppercase;
-      }
-      .debug-list {
-        display: grid;
-        gap: 8px;
-      }
-      .debug-entry {
-        padding: 10px 12px;
-        border-radius: 14px;
-        border: 1px solid var(--border);
-        background: rgba(255, 255, 255, 0.03);
-        color: #b7c4d8;
-        font-family: "SFMono-Regular", "Consolas", "Liberation Mono", monospace;
-        font-size: 12px;
-        line-height: 1.45;
-        white-space: pre-wrap;
-        word-break: break-word;
-      }
-      .debug-empty {
-        color: var(--muted);
-        font-size: 12px;
-      }
       @media (max-width: 720px) {
         body {
           padding: 28px;
@@ -1537,17 +1512,17 @@ fn settings_html() -> String {
         <div class="right-column">
           <label class="toggle-row" for="copy-button-enabled">
             <span class="toggle-label">Allow Copy</span>
-            <span>
+            <span class="toggle-control">
               <input class="toggle-input" id="copy-button-enabled" type="checkbox" />
-              <span class="toggle-switch"></span>
+              <span class="toggle-switch" id="copy-button-toggle"></span>
             </span>
           </label>
 
           <label class="toggle-row" for="launch-on-startup">
             <span class="toggle-label">Launch at Sign-In</span>
-            <span>
+            <span class="toggle-control">
               <input class="toggle-input" id="launch-on-startup" type="checkbox" />
-              <span class="toggle-switch"></span>
+              <span class="toggle-switch" id="launch-on-startup-toggle"></span>
             </span>
           </label>
 
@@ -1568,18 +1543,9 @@ fn settings_html() -> String {
         </button>
       </footer>
 
-      <section class="debug-panel" id="debug-panel" hidden>
-        <div class="debug-header">Debug Logs</div>
-        <div class="debug-list" id="debug-list"></div>
-      </section>
     </main>
     <script>
       document.getElementById("brand-mark").src = "__APP_ICON__";
-
-      const debugState = {
-        visible: false,
-        logs: []
-      };
 
       const elements = {
         sessionState: document.getElementById("session-state"),
@@ -1588,33 +1554,9 @@ fn settings_html() -> String {
         notificationDuration: document.getElementById("notification-duration"),
         copyEnabled: document.getElementById("copy-button-enabled"),
         launchOnStartup: document.getElementById("launch-on-startup"),
-        debugPanel: document.getElementById("debug-panel"),
-        debugList: document.getElementById("debug-list")
+        copyToggle: document.getElementById("copy-button-toggle"),
+        launchToggle: document.getElementById("launch-on-startup-toggle")
       };
-
-      function renderDebugPanel() {
-        elements.debugPanel.hidden = !debugState.visible;
-        elements.debugList.replaceChildren();
-
-        if (!debugState.visible) {
-          return;
-        }
-
-        if (!debugState.logs.length) {
-          const emptyState = document.createElement("div");
-          emptyState.className = "debug-empty";
-          emptyState.textContent = "No debug entries yet.";
-          elements.debugList.appendChild(emptyState);
-          return;
-        }
-
-        for (const entry of debugState.logs) {
-          const item = document.createElement("div");
-          item.className = "debug-entry";
-          item.textContent = entry;
-          elements.debugList.appendChild(item);
-        }
-      }
 
       document.getElementById("save").addEventListener("click", () => {
         window.ipc.postMessage(JSON.stringify({
@@ -1634,7 +1576,27 @@ fn settings_html() -> String {
         window.ipc.postMessage(JSON.stringify({ kind: "hide_status" }));
       });
 
-      window.addEventListener("keydown", (event) => {
+      function syncToggleVisual(input, visual) {
+        visual.classList.toggle("is-on", Boolean(input.checked));
+      }
+
+      elements.copyEnabled.addEventListener("change", () => {
+        syncToggleVisual(elements.copyEnabled, elements.copyToggle);
+      });
+
+      elements.launchOnStartup.addEventListener("change", () => {
+        syncToggleVisual(elements.launchOnStartup, elements.launchToggle);
+      });
+
+      function isEditableTarget(target) {
+        if (!(target instanceof Element)) {
+          return false;
+        }
+
+        return target.closest("input, textarea, select, [contenteditable=\"true\"]") !== null;
+      }
+
+      function handleKeydown(event) {
         if (event.defaultPrevented || event.repeat) {
           return;
         }
@@ -1643,18 +1605,19 @@ fn settings_html() -> String {
           return;
         }
 
+        if (isEditableTarget(event.target)) {
+          return;
+        }
+
         if (event.code === "KeyP") {
           event.preventDefault();
           window.ipc.postMessage(JSON.stringify({ kind: "test_notification" }));
           return;
         }
+      }
 
-        if (event.code === "KeyL") {
-          event.preventDefault();
-          debugState.visible = !debugState.visible;
-          renderDebugPanel();
-        }
-      });
+      window.addEventListener("keydown", handleKeydown, { capture: true });
+      document.addEventListener("keydown", handleKeydown, { capture: true });
 
       window.__PROTON2FA_STATUS = {
         render(payload) {
@@ -1666,8 +1629,8 @@ fn settings_html() -> String {
           elements.notificationDuration.value = payload.notification_duration_seconds;
           elements.copyEnabled.checked = payload.copy_button_enabled;
           elements.launchOnStartup.checked = payload.launch_on_startup;
-          debugState.logs = payload.debug_logs || [];
-          renderDebugPanel();
+          syncToggleVisual(elements.copyEnabled, elements.copyToggle);
+          syncToggleVisual(elements.launchOnStartup, elements.launchToggle);
         }
       };
     </script>
