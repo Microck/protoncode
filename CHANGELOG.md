@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.6](https://github.com/Microck/protoncode/compare/v0.2.5...v0.2.6) (2026-03-14)
+
+
+### Bug Fixes
+
+* **ui:** add overlay debug diagnostics ([9ee820c](https://github.com/Microck/protoncode/commit/9ee820c77d961c4f6b0d45e867d3bb5e7f1966fc))
+
 ## [0.2.5](https://github.com/Microck/protoncode/compare/v0.2.4...v0.2.5) (2026-03-14)
 
 
