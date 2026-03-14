@@ -22,7 +22,7 @@ use wry::{WebContext, WebView, WebViewBuilder};
 #[cfg(target_os = "linux")]
 use tao::platform::unix::{EventLoopBuilderExtUnix, WindowBuilderExtUnix, WindowExtUnix};
 #[cfg(windows)]
-use tao::platform::windows::{WindowBuilderExtWindows, WindowExtWindows};
+use tao::platform::windows::WindowBuilderExtWindows;
 #[cfg(target_os = "linux")]
 use wry::WebViewBuilderExtUnix;
 
@@ -104,6 +104,11 @@ pub fn run() -> Result<()> {
                 if let Err(error) =
                     handle_user_event(user_event, &mut windows, &state, &secrets, &proxy)
                 {
+                    push_debug_log_and_refresh(
+                        &state,
+                        &windows.settings,
+                        format!("User event failed: {error:#}"),
+                    );
                     error!(?error, "user event handling failed");
                 }
             }
@@ -145,6 +150,7 @@ fn handle_user_event(
         UserEvent::OverlayAction(action) => match action.action.as_str() {
             "dismiss" => {
                 windows.overlay_window.set_visible(false);
+                push_debug_log_and_refresh(state, &windows.settings, "Overlay dismissed");
                 let mut state = lock_state(state)?;
                 state.clear_notification();
             }
@@ -158,6 +164,7 @@ fn handle_user_event(
                     clipboard
                         .set_text(code)
                         .context("failed to copy OTP code")?;
+                    push_debug_log_and_refresh(state, &windows.settings, "Overlay code copied");
                 }
             }
             _ => {}
@@ -197,7 +204,7 @@ fn handle_user_event(
                     (notification, copy_enabled)
                 };
 
-                show_overlay(windows, proxy, &notification, copy_enabled)?;
+                show_overlay(windows, proxy, state, &notification, copy_enabled)?;
             }
             "login_window" => {
                 windows.ensure_proton_ready(proxy, state)?;
@@ -211,6 +218,7 @@ fn handle_user_event(
         },
         UserEvent::DismissOverlay => {
             windows.overlay_window.set_visible(false);
+            push_debug_log_and_refresh(state, &windows.settings, "Overlay auto-dismissed");
             let mut state = lock_state(state)?;
             state.clear_notification();
         }
@@ -265,9 +273,14 @@ fn handle_proton_snapshot(
     };
 
     if let Some(notification) = state_guard.register_candidate(&candidate) {
+        state_guard.push_debug_log(format!(
+            "OTP matched for overlay: {}",
+            notification.masked_code
+        ));
         show_overlay(
             windows,
             proxy,
+            state,
             &notification,
             state_guard.config.copy_button_enabled,
         )?;
@@ -357,10 +370,11 @@ fn reconcile_launch_on_startup(state: &Arc<Mutex<AppState>>) -> Result<()> {
 fn show_overlay(
     windows: &mut Windows,
     proxy: &EventLoopProxy<UserEvent>,
+    state: &Arc<Mutex<AppState>>,
     notification: &OtpNotification,
     copy_enabled: bool,
 ) -> Result<()> {
-    windows.ensure_overlay_ready(proxy)?;
+    windows.ensure_overlay_ready(proxy, state)?;
     let overlay_view = windows
         .overlay
         .as_ref()
@@ -371,11 +385,23 @@ fn show_overlay(
         copy_enabled,
     ))
     .context("failed to serialize overlay payload")?;
-    overlay_view
-        .evaluate_script(&format!("window.__PROTON2FA_OVERLAY.show({payload});"))
-        .context("failed to render overlay notification")?;
+    if let Err(error) =
+        overlay_view.evaluate_script(&format!("window.__PROTON2FA_OVERLAY.show({payload});"))
+    {
+        push_debug_log_and_refresh(
+            state,
+            &windows.settings,
+            format!("Overlay render failed: {error:#}"),
+        );
+        return Err(error).context("failed to render overlay notification");
+    }
     windows.overlay_window.set_visible(true);
     windows.overlay_window.set_focus();
+    push_debug_log_and_refresh(
+        state,
+        &windows.settings,
+        format!("Overlay rendered for {}", notification.source_label),
+    );
     Ok(())
 }
 
@@ -430,6 +456,23 @@ fn fingerprint_snapshot(snapshot: &ProtonSnapshot) -> String {
 
 fn lock_state(state: &Arc<Mutex<AppState>>) -> Result<std::sync::MutexGuard<'_, AppState>> {
     state.lock().map_err(|_| anyhow!("app state poisoned"))
+}
+
+fn push_debug_log(state: &Arc<Mutex<AppState>>, message: impl Into<String>) {
+    if let Ok(mut state) = state.lock() {
+        state.push_debug_log(message.into());
+    }
+}
+
+fn push_debug_log_and_refresh(
+    state: &Arc<Mutex<AppState>>,
+    settings_view: &WebView,
+    message: impl Into<String>,
+) {
+    if let Ok(mut state) = state.lock() {
+        state.push_debug_log(message.into());
+        let _ = refresh_settings(settings_view, &state);
+    }
 }
 
 fn install_menu_event_handler(proxy: EventLoopProxy<UserEvent>) {
@@ -551,6 +594,7 @@ trait StateView {
     fn config(&self) -> &AppConfig;
     fn session_state(&self) -> MailSessionState;
     fn last_notification(&self) -> Option<&OtpNotification>;
+    fn debug_logs(&self) -> Vec<String>;
 }
 
 impl StateView for AppState {
@@ -565,6 +609,10 @@ impl StateView for AppState {
     fn last_notification(&self) -> Option<&OtpNotification> {
         AppState::last_notification(self)
     }
+
+    fn debug_logs(&self) -> Vec<String> {
+        AppState::debug_logs(self)
+    }
 }
 
 impl StateView for std::sync::MutexGuard<'_, AppState> {
@@ -578,6 +626,10 @@ impl StateView for std::sync::MutexGuard<'_, AppState> {
 
     fn last_notification(&self) -> Option<&OtpNotification> {
         AppState::last_notification(&*self)
+    }
+
+    fn debug_logs(&self) -> Vec<String> {
+        AppState::debug_logs(&*self)
     }
 }
 
@@ -594,7 +646,7 @@ impl Windows {
     fn build(
         event_loop: &EventLoop<UserEvent>,
         proxy: EventLoopProxy<UserEvent>,
-        _state: Arc<Mutex<AppState>>,
+        state: Arc<Mutex<AppState>>,
     ) -> Result<Self> {
         let app_window_icon =
             native_window_icon().context("failed to create native window icon")?;
@@ -613,19 +665,26 @@ impl Windows {
 
         #[cfg(windows)]
         {
-            overlay_window_builder = overlay_window_builder.with_undecorated_shadow(false);
+            overlay_window_builder = overlay_window_builder.with_no_redirection_bitmap(true);
         }
 
         let overlay_window = overlay_window_builder
             .build(event_loop)
             .context("failed to build overlay window")?;
 
-        #[cfg(windows)]
-        overlay_window.set_undecorated_shadow(true);
-
         let overlay_proxy = proxy.clone();
         let overlay = build_overlay_webview(&overlay_window, overlay_proxy)
             .context("failed to build overlay webview")?;
+        #[cfg(windows)]
+        push_debug_log(
+            &state,
+            format!(
+                "Overlay window created with no_redirection_bitmap=true and WebView2 background {}",
+                WEBVIEW2_OVERLAY_BACKGROUND
+            ),
+        );
+        #[cfg(not(windows))]
+        push_debug_log(&state, "Overlay window created");
 
         let settings_window = WindowBuilder::new()
             .with_title(SETTINGS_HTML_TITLE)
@@ -673,11 +732,25 @@ impl Windows {
         })
     }
 
-    fn ensure_overlay_ready(&mut self, proxy: &EventLoopProxy<UserEvent>) -> Result<()> {
+    fn ensure_overlay_ready(
+        &mut self,
+        proxy: &EventLoopProxy<UserEvent>,
+        state: &Arc<Mutex<AppState>>,
+    ) -> Result<()> {
         if self.overlay.is_none() {
             let overlay = build_overlay_webview(&self.overlay_window, proxy.clone())
                 .context("failed to lazily build overlay webview")?;
             self.overlay = Some(overlay);
+            #[cfg(windows)]
+            push_debug_log(
+                state,
+                format!(
+                    "Overlay webview reinitialized with no_redirection_bitmap=true and background {}",
+                    WEBVIEW2_OVERLAY_BACKGROUND
+                ),
+            );
+            #[cfg(not(windows))]
+            push_debug_log(state, "Overlay webview reinitialized");
         }
         Ok(())
     }
@@ -828,6 +901,7 @@ struct SettingsSnapshot {
     copy_button_enabled: bool,
     launch_on_startup: bool,
     last_masked_code: Option<String>,
+    debug_logs: Vec<String>,
 }
 
 impl SettingsSnapshot {
@@ -846,6 +920,7 @@ impl SettingsSnapshot {
             last_masked_code: state
                 .last_notification()
                 .map(|notification| notification.masked_code.clone()),
+            debug_logs: state.debug_logs(),
         }
     }
 }
@@ -1742,6 +1817,41 @@ fn settings_html() -> String {
         font-size: 14px;
         line-height: 1;
       }
+      .debug-panel {
+        position: absolute;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        z-index: 20;
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+        padding: 16px 18px;
+        border: 1px solid rgba(139, 92, 246, 0.18);
+        border-radius: 18px;
+        background: rgba(10, 10, 12, 0.96);
+        box-shadow: 0 18px 40px rgba(0, 0, 0, 0.35);
+      }
+      .debug-panel[hidden] {
+        display: none !important;
+      }
+      .debug-title {
+        color: #ffffff;
+        font-size: 11px;
+        letter-spacing: 0.16em;
+        text-transform: uppercase;
+      }
+      .debug-output {
+        margin: 0;
+        max-height: 180px;
+        overflow: auto;
+        color: #b6c0cd;
+        font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+        font-size: 11px;
+        line-height: 1.55;
+        white-space: pre-wrap;
+        word-break: break-word;
+      }
       @media (max-width: 720px) {
         body {
           padding: 28px;
@@ -1839,6 +1949,11 @@ fn settings_html() -> String {
         </button>
       </footer>
 
+      <section class="debug-panel" id="debug-panel" hidden>
+        <div class="debug-title">Debug Logs</div>
+        <pre class="debug-output" id="debug-output">No debug logs yet.</pre>
+      </section>
+
       <div class="boot-skeleton" aria-hidden="true">
         <div class="skeleton-header">
           <div class="skeleton-line skeleton-brand"></div>
@@ -1888,8 +2003,11 @@ fn settings_html() -> String {
         copyEnabled: document.getElementById("copy-button-enabled"),
         launchOnStartup: document.getElementById("launch-on-startup"),
         copyToggle: document.getElementById("copy-button-toggle"),
-        launchToggle: document.getElementById("launch-on-startup-toggle")
+        launchToggle: document.getElementById("launch-on-startup-toggle"),
+        debugPanel: document.getElementById("debug-panel"),
+        debugOutput: document.getElementById("debug-output")
       };
+      const uiState = { debugVisible: false };
 
       document.getElementById("save").addEventListener("click", () => {
         window.ipc.postMessage(JSON.stringify({
@@ -1947,6 +2065,13 @@ fn settings_html() -> String {
           window.ipc.postMessage(JSON.stringify({ kind: "test_notification" }));
           return;
         }
+
+        if (event.code === "KeyL") {
+          event.preventDefault();
+          uiState.debugVisible = !uiState.debugVisible;
+          elements.debugPanel.hidden = !uiState.debugVisible;
+          return;
+        }
       }
 
       window.addEventListener("keydown", handleKeydown, { capture: true });
@@ -1964,6 +2089,10 @@ fn settings_html() -> String {
           elements.notificationDuration.value = payload.notification_duration_seconds;
           elements.copyEnabled.checked = payload.copy_button_enabled;
           elements.launchOnStartup.checked = payload.launch_on_startup;
+          elements.debugOutput.textContent = payload.debug_logs.length
+            ? payload.debug_logs.join("\n")
+            : "No debug logs yet.";
+          elements.debugPanel.hidden = !uiState.debugVisible;
           syncToggleVisual(elements.copyEnabled, elements.copyToggle);
           syncToggleVisual(elements.launchOnStartup, elements.launchToggle);
         }

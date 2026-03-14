@@ -11,12 +11,14 @@ use crate::models::{MailSessionState, OtpCandidateEmail, OtpNotification};
 use crate::otp::detect_otp;
 
 const RECENT_CACHE_LIMIT: usize = 128;
+const DEBUG_LOG_LIMIT: usize = 120;
 #[derive(Debug, Clone)]
 pub struct AppState {
     pub config: AppConfig,
     pub session_state: MailSessionState,
     pub current_notification: Option<OtpNotification>,
     last_notification: Option<OtpNotification>,
+    debug_logs: VecDeque<String>,
     recent_message_ids: HashSet<String>,
     recent_message_order: VecDeque<String>,
     seen_cache_path: PathBuf,
@@ -34,15 +36,17 @@ impl AppState {
 
         let (recent_message_ids, recent_message_order) =
             load_seen_cache(&seen_cache_path).unwrap_or_default();
-        let state = Self {
+        let mut state = Self {
             config,
             session_state: MailSessionState::Unauthenticated,
             current_notification: None,
             last_notification: None,
+            debug_logs: VecDeque::new(),
             recent_message_ids,
             recent_message_order,
             seen_cache_path,
         };
+        state.push_debug_log("Application started");
         Ok(state)
     }
 
@@ -89,6 +93,10 @@ impl AppState {
         self.last_notification.as_ref()
     }
 
+    pub fn debug_logs(&self) -> Vec<String> {
+        self.debug_logs.iter().cloned().collect()
+    }
+
     pub fn has_seen_message(&self, message_id: &str) -> bool {
         self.recent_message_ids.contains(message_id)
     }
@@ -106,6 +114,21 @@ impl AppState {
 
         if let Err(error) = self.persist_seen_cache() {
             warn!(?error, "failed to persist seen cache");
+        }
+    }
+
+    pub fn push_debug_log(&mut self, message: impl Into<String>) {
+        let timestamp = OffsetDateTime::now_utc()
+            .format(
+                &time::format_description::parse("[hour]:[minute]:[second]")
+                    .expect("valid time format"),
+            )
+            .unwrap_or_else(|_| "??:??:??".to_owned());
+        self.debug_logs
+            .push_back(format!("{timestamp}  {}", message.into()));
+
+        while self.debug_logs.len() > DEBUG_LOG_LIMIT {
+            self.debug_logs.pop_front();
         }
     }
 
@@ -136,7 +159,7 @@ fn load_seen_cache(path: &PathBuf) -> Result<(HashSet<String>, VecDeque<String>)
 mod tests {
     use std::path::PathBuf;
 
-    use super::AppState;
+    use super::{AppState, DEBUG_LOG_LIMIT};
     use crate::config::AppConfig;
     use crate::models::OtpCandidateEmail;
     use time::OffsetDateTime;
@@ -191,6 +214,27 @@ mod tests {
                 .last_notification()
                 .map(|last| last.masked_code.as_str()),
             Some(notification.masked_code.as_str())
+        );
+    }
+
+    #[test]
+    fn debug_logs_keep_most_recent_entries() {
+        let mut state = AppState::from_config(test_config()).unwrap();
+
+        for index in 0..(DEBUG_LOG_LIMIT + 5) {
+            state.push_debug_log(format!("entry {index}"));
+        }
+
+        let logs = state.debug_logs();
+        assert_eq!(logs.len(), DEBUG_LOG_LIMIT);
+        assert!(logs.first().is_some_and(|entry| entry.contains("entry 5")));
+        assert!(
+            logs.last()
+                .is_some_and(|entry| { entry.contains(&format!("entry {}", DEBUG_LOG_LIMIT + 4)) })
+        );
+        assert!(
+            logs.iter()
+                .all(|entry| !entry.contains("Application started"))
         );
     }
 }
