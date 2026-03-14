@@ -22,7 +22,7 @@ use wry::{WebContext, WebView, WebViewBuilder};
 #[cfg(target_os = "linux")]
 use tao::platform::unix::{EventLoopBuilderExtUnix, WindowBuilderExtUnix, WindowExtUnix};
 #[cfg(windows)]
-use tao::platform::windows::WindowBuilderExtWindows;
+use tao::platform::windows::{WindowBuilderExtWindows, WindowExtWindows};
 #[cfg(target_os = "linux")]
 use wry::WebViewBuilderExtUnix;
 
@@ -37,7 +37,7 @@ const SETTINGS_HTML_TITLE: &str = "ProtonCode";
 const PROTON_LOGIN_TITLE: &str = "Proton Mail - ProtonCode";
 const OVERLAY_WINDOW_TITLE: &str = "ProtonCode Notification";
 const OVERLAY_WIDTH: f64 = 420.0;
-const OVERLAY_HEIGHT: f64 = 276.0;
+const OVERLAY_HEIGHT: f64 = 312.0;
 const APP_PROTOCOL: &str = "protoncode";
 const OVERLAY_PAGE_URL: &str = "protoncode://app/overlay.html";
 const SETTINGS_PAGE_URL: &str = "protoncode://app/settings.html";
@@ -461,6 +461,12 @@ fn build_overlay_webview(window: &Window, proxy: EventLoopProxy<UserEvent>) -> R
         let webview = build_platform_webview(
             WebViewBuilder::new()
                 .with_transparent(true)
+                .with_initialization_script(
+                    r#"
+                      document.documentElement.style.background = "transparent";
+                      document.body.style.background = "transparent";
+                    "#,
+                )
                 .with_custom_protocol(APP_PROTOCOL.into(), |_webview_id, request| {
                     app_protocol_response(request)
                 })
@@ -593,7 +599,8 @@ impl Windows {
         let app_window_icon =
             native_window_icon().context("failed to create native window icon")?;
 
-        let overlay_window = WindowBuilder::new()
+        #[allow(unused_mut)]
+        let mut overlay_window_builder = WindowBuilder::new()
             .with_title(OVERLAY_WINDOW_TITLE)
             .with_visible(false)
             .with_decorations(false)
@@ -602,9 +609,19 @@ impl Windows {
             .with_transparent(true)
             .with_resizable(false)
             .with_window_icon(Some(app_window_icon.clone()))
-            .with_inner_size(LogicalSize::new(OVERLAY_WIDTH, OVERLAY_HEIGHT))
+            .with_inner_size(LogicalSize::new(OVERLAY_WIDTH, OVERLAY_HEIGHT));
+
+        #[cfg(windows)]
+        {
+            overlay_window_builder = overlay_window_builder.with_undecorated_shadow(false);
+        }
+
+        let overlay_window = overlay_window_builder
             .build(event_loop)
             .context("failed to build overlay window")?;
+
+        #[cfg(windows)]
+        overlay_window.set_undecorated_shadow(true);
 
         let overlay_proxy = proxy.clone();
         let overlay = build_overlay_webview(&overlay_window, overlay_proxy)
@@ -976,13 +993,13 @@ fn overlay_html() -> String {
         display: flex;
         align-items: stretch;
         justify-content: stretch;
-        padding: 10px;
+        padding: 12px;
         background: transparent;
       }
       .card {
         width: 100%;
         height: 100%;
-        padding: 18px 18px 16px;
+        padding: 18px;
         border-radius: 22px;
         border: 1px solid var(--border);
         background: var(--panel);
@@ -990,7 +1007,7 @@ fn overlay_html() -> String {
         box-shadow: 0 24px 60px rgba(0, 0, 0, 0.42), inset 0 1px 0 rgba(255, 255, 255, 0.04);
         display: flex;
         flex-direction: column;
-        gap: 14px;
+        gap: 12px;
         opacity: 0;
         transform: translateY(12px) scale(0.985);
         overflow: hidden;
@@ -1054,13 +1071,13 @@ fn overlay_html() -> String {
         color: #ffffff;
         font-size: 16px;
         font-weight: 400;
-        line-height: 1.4;
+        line-height: 1.35;
         display: -webkit-box;
         overflow: hidden;
         text-overflow: ellipsis;
         -webkit-box-orient: vertical;
         -webkit-line-clamp: 3;
-        min-height: 2.8em;
+        min-height: 2.7em;
         overflow-wrap: anywhere;
       }
       .code-row {
@@ -1068,7 +1085,7 @@ fn overlay_html() -> String {
         grid-template-columns: minmax(0, 1fr) auto;
         align-items: stretch;
         gap: 10px;
-        min-height: 58px;
+        min-height: 56px;
       }
       .code {
         min-width: 0;
@@ -1137,7 +1154,7 @@ fn overlay_html() -> String {
         color: var(--muted);
         font-size: 12px;
         line-height: 1.4;
-        min-height: 22px;
+        min-height: 18px;
       }
       .meta strong {
         color: #ffffff;
@@ -1188,6 +1205,9 @@ fn overlay_html() -> String {
         rawCode: "",
         revealed: false,
         hideTimer: null,
+        hideStartedAt: 0,
+        remainingMs: 0,
+        hovering: false,
       };
       const eyeIcon = `
         <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -1237,11 +1257,64 @@ fn overlay_html() -> String {
       }
 
       function hide() {
+        window.clearTimeout(state.hideTimer);
+        state.hideTimer = null;
+        state.hideStartedAt = 0;
+        state.remainingMs = 0;
         card.classList.remove("is-visible");
         card.hidden = true;
         state.revealed = false;
         renderCode();
       }
+
+      function dismissAfterTimeout() {
+        window.ipc.postMessage(JSON.stringify({ action: "dismiss" }));
+        hide();
+      }
+
+      function scheduleHide(delayMs) {
+        window.clearTimeout(state.hideTimer);
+        state.hideTimer = null;
+        state.remainingMs = Math.max(0, Math.round(delayMs));
+        if (state.remainingMs === 0 || state.hovering) {
+          return;
+        }
+
+        state.hideStartedAt = Date.now();
+        state.hideTimer = window.setTimeout(() => {
+          dismissAfterTimeout();
+        }, state.remainingMs);
+      }
+
+      function pauseHide() {
+        if (state.hideTimer === null) {
+          return;
+        }
+
+        const elapsedMs = Date.now() - state.hideStartedAt;
+        window.clearTimeout(state.hideTimer);
+        state.hideTimer = null;
+        state.hideStartedAt = 0;
+        state.remainingMs = Math.max(0, state.remainingMs - elapsedMs);
+      }
+
+      function resumeHide() {
+        if (card.hidden || state.remainingMs <= 0) {
+          return;
+        }
+
+        scheduleHide(state.remainingMs);
+      }
+
+      card.addEventListener("pointerenter", () => {
+        state.hovering = true;
+        pauseHide();
+      });
+
+      card.addEventListener("pointerleave", () => {
+        state.hovering = false;
+        resumeHide();
+      });
 
       window.__PROTON2FA_OVERLAY = {
         show(payload) {
@@ -1261,11 +1334,8 @@ fn overlay_html() -> String {
           window.requestAnimationFrame(() => {
             card.classList.add("is-visible");
           });
-          window.clearTimeout(state.hideTimer);
-          state.hideTimer = window.setTimeout(() => {
-            window.ipc.postMessage(JSON.stringify({ action: "dismiss" }));
-            hide();
-          }, payload.duration_ms);
+          state.hovering = false;
+          scheduleHide(payload.duration_ms);
         }
       };
     </script>
