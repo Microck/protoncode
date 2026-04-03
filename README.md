@@ -96,8 +96,36 @@ cargo build --release --target x86_64-pc-windows-gnu
 - release-please manages version bumps and github releases from conventional commits
 - release workflows build `protoncode.exe` on windows and `.deb`, `.rpm`, and `.tar.gz` assets on linux
 
-## notes
+## architecture
+
+```
+src/
+├── main.rs          # entry point, cli flag parsing
+├── app.rs           # application lifecycle, event loop
+├── desktop_app.rs   # tray icon, window management, wry webview
+├── otp.rs           # otp detection from proton mail html
+├── config.rs        # settings persistence (serde_json)
+├── models.rs        # notification and otp data types
+├── secrets.rs       # platform credential store (keyring)
+├── autostart.rs     # windows run key / linux autostart
+└── lib.rs           # shared re-exports
+```
+
+the app embeds a wry webview for the proton mail login flow. once authenticated, it polls the webview's page content for otp patterns. detected codes appear as masked overlay notifications near the system tray. the webview session persists across restarts in the platform data directory.
+
+## troubleshooting
+
+| problem | fix |
+|---|---|
+| no notifications appear | check that proton mail is fully loaded in the status window. log in again if the session expired |
+| overlay position is wrong on multi-monitor | protoncode targets the primary monitor. move the app to the primary display |
+| autostart does not work on linux | verify `~/.config/autostart/protoncode.desktop` exists and is executable |
+| linux build fails on missing webkitgtk | install `libwebkit2gtk-4.1-dev` (debian/ubuntu) or `webkit2gtk4.1-devel` (fedora) |
+| session lost after update | credential store data persists across updates. if lost, re-login from the status window |
+
+## limitations
 
 - the proton integration uses a web-session approach, not proton mail bridge
-- that means the monitor is best-effort and may break if proton changes its web ui or session behavior
+- the monitor is best-effort and may break if proton changes its web ui or session behavior
 - session metadata is stored through the platform credential store, while the live web session stays in the webview profile directory
+- otp detection relies on regex pattern matching against rendered email content
