@@ -97,10 +97,6 @@ impl AppState {
         self.debug_logs.iter().cloned().collect()
     }
 
-    pub fn has_seen_message(&self, message_id: &str) -> bool {
-        self.recent_message_ids.contains(message_id)
-    }
-
     fn track_message(&mut self, message_id: String) {
         if self.recent_message_ids.insert(message_id.clone()) {
             self.recent_message_order.push_back(message_id);

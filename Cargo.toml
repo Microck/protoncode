@@ -13,18 +13,15 @@ repository = "https://github.com/Microck/protoncode"
 anyhow = "1.0.100"
 arboard = "3.6.1"
 base64 = "0.22.1"
-crossbeam-channel = "0.5.15"
 dirs = "6.0.0"
 image = { version = "0.25.8", default-features = false, features = ["png"] }
 keyring = "3.6.3"
 regex = "1.12.2"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"
-thiserror = "2.0.17"
 time = { version = "0.3.44", features = ["formatting", "local-offset", "macros", "parsing", "serde"] }
 tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.20", features = ["env-filter", "fmt"] }
-url = "2.5.7"
 
 [target.'cfg(any(windows, target_os = "linux"))'.dependencies]
 tao = "0.34.6"

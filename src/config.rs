@@ -88,10 +88,6 @@ pub fn config_path() -> Option<PathBuf> {
     app_config_dir().map(|dir| dir.join("config.json"))
 }
 
-pub fn seen_cache_path() -> Option<PathBuf> {
-    app_config_dir().map(|dir| dir.join("seen-cache.json"))
-}
-
 pub fn ensure_parent_dir(path: &Path) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
