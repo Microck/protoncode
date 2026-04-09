@@ -1,5 +1,28 @@
 # Changelog
 
+All notable changes to this project will be documented in this file. See [release-please](https://github.com/googleapis/release-please) for commit conventions.
+
+## [0.1.2](https://github.com/Microck/protoncode/compare/v0.1.1...v0.1.2) (2026-03-13)
+
+### Bug Fixes
+
+* **ui:** polish desktop windows ([c80d109](https://github.com/Microck/protoncode/commit/c80d1097ea46c481d3aa0663b42ad0e1f581edc4))
+
+## [0.1.1](https://github.com/Microck/protoncode/compare/v0.1.0...v0.1.1) (2026-03-13)
+
+### Bug Fixes
+
+* publish exe assets directly ([eab98e8](https://github.com/Microck/protoncode/commit/eab98e8))
+* optimize images ([1455fe0](https://github.com/Microck/protoncode/commit/1455fe0))
+
+## 0.1.0 (2026-03-13)
+
+### Features
+
+* bootstrap protoncode windows release app ([1b79e10](https://github.com/Microck/protoncode/commit/1b79e10))
+
+---
+
 ## [0.2.7](https://github.com/Microck/protoncode/compare/v0.2.6...v0.2.7) (2026-03-14)
 
 
@@ -76,10 +99,3 @@
 ### Bug Fixes
 
 * **windows:** load ui assets through a custom protocol ([a8d7cd6](https://github.com/Microck/protoncode/commit/a8d7cd6de0bf550c2fd76ea210111a507a1a3bec))
-
-## [0.1.2](https://github.com/Microck/protoncode/compare/v0.1.1...v0.1.2) (2026-03-13)
-
-
-### Bug Fixes
-
-* **ui:** polish desktop windows ([c80d109](https://github.com/Microck/protoncode/commit/c80d1097ea46c481d3aa0663b42ad0e1f581edc4))
