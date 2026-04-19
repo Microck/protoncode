@@ -1,3 +1,12 @@
+//! Desktop GUI application built on [`wry`], [`tao`] and [`tray_icon`].
+//!
+//! Creates the main event loop with three windows (Proton Mail webview, settings
+//! panel, and OTP notification overlay), a system-tray icon with context menu,
+//! and wires up the JavaScript ↔ Rust bridge for OTP detection and session
+//! management.
+//!
+//! The only public entry point is [`run`].
+
 use std::borrow::Cow;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -46,6 +55,11 @@ const WEBVIEW2_OVERLAY_BACKGROUND: &str = "00000000";
 const WEBVIEW2_APP_BACKGROUND: &str = "FF181818";
 const STARTUP_PROTON_DEFER_MS: u64 = 650;
 
+/// Starts the ProtonCode desktop application.
+///
+/// Loads configuration, creates the event loop, windows (settings, Proton Mail
+/// webview, and OTP overlay), system-tray menu, and runs the main event loop
+/// until the user quits.
 pub fn run() -> Result<()> {
     let state = Arc::new(Mutex::new(AppState::load()?));
     reconcile_launch_on_startup(&state)?;

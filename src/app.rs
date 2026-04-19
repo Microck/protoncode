@@ -1,3 +1,8 @@
+//! Core application state management.
+//!
+//! Owns the loaded [`AppConfig`], tracks the Proton Mail session state,
+//! manages the seen-message cache, and coordinates OTP notification lifecycle.
+
 use std::collections::{HashSet, VecDeque};
 use std::fs;
 use std::path::PathBuf;

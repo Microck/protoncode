@@ -1,7 +1,13 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
+//! Entry point for the ProtonCode desktop application.
+//!
+//! Initialises the tracing subscriber, sets platform-specific workarounds,
+//! and delegates to the [`desktop_app::run`] entry on supported platforms.
+
 use anyhow::Result;
 
+/// Application entry point. Configures logging and launches the desktop GUI.
 fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())

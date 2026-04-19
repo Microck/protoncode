@@ -1,3 +1,6 @@
+//! ProtonCode — a desktop application that monitors Proton Mail for incoming
+//! one-time password (OTP) codes and surfaces them as desktop notifications.
+
 pub mod app;
 pub mod autostart;
 pub mod config;

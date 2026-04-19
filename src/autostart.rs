@@ -1,14 +1,22 @@
+//! Operating-system autostart registration.
+//!
+//! On Windows this writes/removes a Run-key entry in the registry so that
+//! ProtonCode starts automatically at login. On other platforms the functions
+//! are no-ops.
 use std::ffi::OsStr;
 use std::path::Path;
 
 use anyhow::Result;
 
+/// Command-line flag that signals the app was launched by the OS autostart mechanism.
 pub const AUTOSTART_FLAG: &str = "--autostart";
+/// Registry value name used for the Windows CurrentVersion\Run entry.
 pub const APP_RUN_KEY_VALUE: &str = "protoncode";
 
 #[cfg(windows)]
 const RUN_KEY_PATH: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
 
+/// Returns `true` when the given argument list contains the [`AUTOSTART_FLAG`].
 pub fn has_autostart_flag<I, S>(args: I) -> bool
 where
     I: IntoIterator<Item = S>,
@@ -18,21 +26,25 @@ where
         .any(|arg| arg.as_ref() == OsStr::new(AUTOSTART_FLAG))
 }
 
+/// Builds the command-line string written to the autostart registry entry.
 pub fn format_autostart_command(executable_path: &Path) -> String {
     format!("\"{}\" {AUTOSTART_FLAG}", executable_path.display())
 }
 
 #[cfg(windows)]
+/// Registers or removes the autostart entry based on `enabled`.
 pub fn sync_launch_on_startup(enabled: bool) -> Result<()> {
     if enabled { enable() } else { disable() }
 }
 
 #[cfg(not(windows))]
+/// No-op on non-Windows platforms.
 pub fn sync_launch_on_startup(_enabled: bool) -> Result<()> {
     Ok(())
 }
 
 #[cfg(windows)]
+/// Returns the current autostart command registered in the Windows Run key, if any.
 pub fn current_registration() -> Result<Option<String>> {
     use anyhow::Context;
     use winreg::RegKey;
@@ -53,16 +65,19 @@ pub fn current_registration() -> Result<Option<String>> {
 }
 
 #[cfg(not(windows))]
+/// Always returns `None` on non-Windows platforms.
 pub fn current_registration() -> Result<Option<String>> {
     Ok(None)
 }
 
 #[cfg(windows)]
+/// Returns `true` when the autostart registry entry is present.
 pub fn is_enabled() -> Result<bool> {
     Ok(current_registration()?.is_some())
 }
 
 #[cfg(not(windows))]
+/// Always returns `false` on non-Windows platforms.
 pub fn is_enabled() -> Result<bool> {
     Ok(false)
 }

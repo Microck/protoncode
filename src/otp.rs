@@ -1,3 +1,8 @@
+//! OTP (one-time password) detection engine.
+//!
+//! Scans email candidates for numeric codes that look like verification / 2FA
+//! OTPs by combining regex extraction with context-term heuristics.
+
 use regex::Regex;
 
 use crate::models::{OtpCandidateEmail, OtpMatch};
